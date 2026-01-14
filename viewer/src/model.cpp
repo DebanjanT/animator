@@ -29,6 +29,13 @@ void Model::load(const std::string &path) {
   std::cout << "Model loaded: " << path << std::endl;
   std::cout << "  Meshes: " << meshes.size() << std::endl;
   std::cout << "  Bones: " << boneCounter << std::endl;
+  
+  // Log all bone names for analysis
+  if (boneCounter > 0) {
+    std::cout << "\n=== BONE HIERARCHY ===" << std::endl;
+    logBoneHierarchy(rootBone, 0);
+    std::cout << "=== END BONE HIERARCHY ===\n" << std::endl;
+  }
 }
 
 void Model::draw(Shader &shader) {
@@ -188,5 +195,15 @@ void Model::buildBoneHierarchy(const aiNode *node, BoneNode &boneNode) {
     BoneNode child;
     buildBoneHierarchy(node->mChildren[i], child);
     boneNode.children.push_back(child);
+  }
+}
+
+void Model::logBoneHierarchy(const BoneNode &node, int depth) {
+  std::string indent(depth * 2, ' ');
+  std::string boneMarker = (node.boneId >= 0) ? " [BONE:" + std::to_string(node.boneId) + "]" : "";
+  std::cout << indent << node.name << boneMarker << std::endl;
+  
+  for (const auto &child : node.children) {
+    logBoneHierarchy(child, depth + 1);
   }
 }

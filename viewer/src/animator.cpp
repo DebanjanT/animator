@@ -131,6 +131,8 @@ void Animator::updateBoneTransformByIndex(int boneIndex,
 
 void Animator::setBoneTransforms(
     const std::map<std::string, BoneTransform> &transforms) {
+  // Don't reset - just update the bones we have transforms for
+  // Other bones keep their current state (identity = bind pose)
   boneTransforms = transforms;
   calculateBoneTransforms();
 }
@@ -143,15 +145,59 @@ void Animator::calculateBoneTransforms() {
   if (!model)
     return;
 
-  auto &boneInfoMap = model->getBoneInfoMap();
-
-  for (auto &[boneName, transform] : boneTransforms) {
-    auto it = boneInfoMap.find(boneName);
-    if (it != boneInfoMap.end()) {
-      int boneIndex = it->second.id;
-      glm::mat4 localTransform = getBoneLocalTransform(boneName);
-      finalBoneMatrices[boneIndex] = localTransform * it->second.offset;
+  // Use hierarchical calculation - traverse bone tree from root
+  // This ensures child bones inherit parent transforms
+  if (model->getHasSkeleton()) {
+    const BoneNode &root = model->getRootBone();
+    calculateHierarchicalTransforms(root, glm::mat4(1.0f));
+  }
+  
+  static bool firstDebug = true;
+  if (firstDebug && !boneTransforms.empty()) {
+    auto &boneInfoMap = model->getBoneInfoMap();
+    int matchedBones = 0;
+    for (auto &[boneName, transform] : boneTransforms) {
+      auto it = boneInfoMap.find(boneName);
+      if (it != boneInfoMap.end()) {
+        glm::quat q = transform.rotation;
+        std::cout << "Bone " << boneName << " rotation: w=" << q.w 
+                  << " x=" << q.x << " y=" << q.y << " z=" << q.z << std::endl;
+        matchedBones++;
+      } else {
+        std::cout << "Bone NOT found in model: " << boneName << std::endl;
+      }
     }
+    std::cout << "Matched " << matchedBones << "/" << boneTransforms.size() << " bones" << std::endl;
+    firstDebug = false;
+  }
+}
+
+void Animator::calculateHierarchicalTransforms(const BoneNode &node,
+                                               const glm::mat4 &parentGlobalTransform) {
+  // Get local rotation for this bone (identity if not in our transform map)
+  glm::mat4 localRotation = glm::mat4(1.0f);
+  auto it = boneTransforms.find(node.name);
+  if (it != boneTransforms.end()) {
+    localRotation = glm::toMat4(it->second.rotation);
+  }
+  
+  // Global transform = parent's global * node's bind pose transform * our rotation
+  // The node.transform contains the bind pose transformation from parent to this bone
+  glm::mat4 globalTransform = parentGlobalTransform * node.transform * localRotation;
+  
+  // If this is a bone (has valid ID), update its final matrix
+  if (node.boneId >= 0 && node.boneId < (int)finalBoneMatrices.size()) {
+    auto &boneInfoMap = model->getBoneInfoMap();
+    auto boneIt = boneInfoMap.find(node.name);
+    if (boneIt != boneInfoMap.end()) {
+      // Final matrix = global transform * inverse bind pose (offset)
+      finalBoneMatrices[node.boneId] = globalTransform * boneIt->second.offset;
+    }
+  }
+  
+  // Recursively process children - they inherit our global transform
+  for (const auto &child : node.children) {
+    calculateHierarchicalTransforms(child, globalTransform);
   }
 }
 

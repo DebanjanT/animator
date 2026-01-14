@@ -114,16 +114,22 @@ SKELETON_BONES = [
 
 @dataclass
 class Joint2D:
-    """Single 2D joint with position and confidence."""
+    """Single 2D joint with position, depth, and confidence."""
     name: str
     index: int
     x: float  # Normalized 0-1
     y: float  # Normalized 0-1
-    confidence: float  # 0-1
+    z: float = 0.0  # Depth (relative to hips, smaller = closer to camera)
+    confidence: float = 0.9  # 0-1
     
     @property
     def position(self) -> Tuple[float, float]:
         return (self.x, self.y)
+    
+    @property
+    def position_3d(self) -> Tuple[float, float, float]:
+        """Get 3D position (x, y, z)."""
+        return (self.x, self.y, self.z)
     
     @property
     def is_visible(self) -> bool:
@@ -322,6 +328,7 @@ class PoseEstimator2D:
                     index=int(idx),
                     x=landmark.x,
                     y=landmark.y,
+                    z=landmark.z if hasattr(landmark, 'z') else 0.0,
                     confidence=landmark.visibility if hasattr(landmark, 'visibility') else 0.9
                 )
         

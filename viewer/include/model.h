@@ -56,6 +56,7 @@ private:
   void setVertexBoneData(Vertex &vertex, int boneID, float weight);
 
   void buildBoneHierarchy(const aiNode *node, BoneNode &boneNode);
+  void logBoneHierarchy(const BoneNode &node, int depth);
 };
 
 #endif

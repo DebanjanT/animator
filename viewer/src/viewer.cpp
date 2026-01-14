@@ -226,8 +226,10 @@ void MoCapViewer::run() {
 
     processInput();
 
-    // Update animation
-    animator->updateAnimation(deltaTime);
+    // Update animation only if no external pose data is being used
+    if (!animator->hasExternalTransforms()) {
+      animator->updateAnimation(deltaTime);
+    }
 
     render();
     renderImGui();
@@ -243,7 +245,50 @@ void MoCapViewer::run() {
 }
 
 void MoCapViewer::runAsync() {
-  std::thread([this]() { run(); }).detach();
+  // On macOS, GLFW must poll events on main thread
+  // Mark as running - caller should use runOneFrame() in their own loop
+  running = true;
+}
+
+bool MoCapViewer::runOneFrame() {
+  if (!running || glfwWindowShouldClose(window)) {
+    running = false;
+    return false;
+  }
+  
+  float currentFrame = static_cast<float>(glfwGetTime());
+  deltaTime = currentFrame - lastFrame;
+  lastFrame = currentFrame;
+
+  glfwPollEvents();
+
+  // Start ImGui frame
+  ImGui_ImplOpenGL3_NewFrame();
+  ImGui_ImplGlfw_NewFrame();
+  ImGui::NewFrame();
+  ImGuizmo::BeginFrame();
+
+  processInput();
+
+  // Update animation only if no external pose data is being used
+  if (!animator->hasExternalTransforms()) {
+    animator->updateAnimation(deltaTime);
+  }
+
+  render();
+  renderImGui();
+
+  // Render ImGui
+  ImGui::Render();
+  ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+  glfwSwapBuffers(window);
+  
+  return true;
+}
+
+bool MoCapViewer::shouldClose() const {
+  return window ? glfwWindowShouldClose(window) : true;
 }
 
 void MoCapViewer::stop() { running = false; }
@@ -545,12 +590,22 @@ void MoCapViewer::render() {
 
     shader->setMat4("model", modelMatrix);
 
-    // Enable skinning only if we have a valid animation with actual bone data
+    // Enable skinning if we have animation OR external bone transforms
     Animation *anim = animator->getCurrentAnimation();
     bool hasAnimation = anim && anim->isValid();
-    shader->setBool("useSkinning", hasAnimation);
+    bool hasExternalPose = animator->hasExternalTransforms();
+    bool useSkinning = hasAnimation || hasExternalPose;
+    
+    static bool debugOnce = true;
+    if (debugOnce && hasExternalPose) {
+      std::cout << "SKINNING ENABLED: hasAnim=" << hasAnimation 
+                << " hasExternal=" << hasExternalPose << std::endl;
+      debugOnce = false;
+    }
+    
+    shader->setBool("useSkinning", useSkinning);
 
-    if (hasAnimation) {
+    if (useSkinning) {
       auto &boneMatrices = animator->getFinalBoneMatrices();
       for (int i = 0; i < std::min(100, (int)boneMatrices.size()); i++) {
         shader->setMat4("finalBonesMatrices[" + std::to_string(i) + "]",
@@ -675,6 +730,16 @@ void MoCapViewer::setAnimationFrame(
     const std::map<std::string, std::vector<float>> &boneTransforms) {
   std::lock_guard<std::mutex> lock(dataMutex);
   std::map<std::string, BoneTransform> transforms;
+  
+  static bool firstCall = true;
+  if (firstCall && model) {
+    auto &boneInfoMap = model->getBoneInfoMap();
+    std::cout << "Available bones in model (" << boneInfoMap.size() << "):" << std::endl;
+    for (const auto &[name, info] : boneInfoMap) {
+      std::cout << "  [" << info.id << "] " << name << std::endl;
+    }
+    firstCall = false;
+  }
 
   for (const auto &[name, data] : boneTransforms) {
     if (data.size() >= 10) {

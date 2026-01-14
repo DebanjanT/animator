@@ -64,6 +64,7 @@ public:
   void setFinalBoneMatrices(const std::vector<glm::mat4> &matrices);
   void calculateBoneTransforms();
   std::vector<glm::mat4> &getFinalBoneMatrices() { return finalBoneMatrices; }
+  bool hasExternalTransforms() const { return !boneTransforms.empty(); }
 
   void reset();
 
@@ -86,6 +87,8 @@ private:
 
   void calculateBoneTransform(const AssimpNodeData &node,
                               const glm::mat4 &parentTransform);
+  void calculateHierarchicalTransforms(const BoneNode &node,
+                                       const glm::mat4 &parentGlobalTransform);
   glm::mat4 getBoneLocalTransform(const std::string &boneName);
 };
 

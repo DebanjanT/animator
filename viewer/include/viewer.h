@@ -28,8 +28,10 @@ public:
   void loadModel(const std::string &path);
   void run();
   void runAsync();
+  bool runOneFrame();  // Process single frame, returns false if should quit
   void stop();
   bool isRunning() const { return running; }
+  bool shouldClose() const;
 
   // Animation control
   void setBoneTransform(const std::string &boneName, float px, float py,

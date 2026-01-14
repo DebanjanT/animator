@@ -16,7 +16,11 @@ PYBIND11_MODULE(mocap_viewer_py, m) {
            "Load a 3D model (FBX, OBJ, etc.)")
       .def("run", &MoCapViewer::run, "Run the viewer main loop (blocking)")
       .def("run_async", &MoCapViewer::runAsync,
-           "Run the viewer in a separate thread")
+           "Mark viewer as running for frame-by-frame processing")
+      .def("run_one_frame", &MoCapViewer::runOneFrame,
+           "Process single frame, returns False if should quit")
+      .def("should_close", &MoCapViewer::shouldClose,
+           "Check if window should close")
       .def("stop", &MoCapViewer::stop, "Stop the viewer")
       .def("is_running", &MoCapViewer::isRunning,
            "Check if the viewer is running")
