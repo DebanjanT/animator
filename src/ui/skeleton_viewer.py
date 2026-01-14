@@ -175,6 +175,8 @@ class SkeletonViewer3D:
     
     def _project_point(self, x: float, y: float, z: float) -> Tuple[int, int]:
         """Project 3D point to 2D screen coordinates."""
+        y = -y
+        
         rot_y_rad = np.radians(self._rotation_y)
         rot_x_rad = np.radians(self._rotation_x)
         
