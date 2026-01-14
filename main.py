@@ -104,23 +104,16 @@ def run_gui(config: Config) -> int:
     
     try:
         import gi
-        gi.require_version("Gtk", "3.0")
+        gi.require_version("Gtk", "4.0")
         from gi.repository import Gtk
         
-        from src.ui.main_window import MainWindow
+        from src.ui.gtk4_window import run_gtk4_app
         
-        logger.info("Initializing GTK window")
-        window = MainWindow(config)
-        window.connect("destroy", Gtk.main_quit)
-        window.show_all()
-        
-        logger.info("Starting GTK main loop")
-        Gtk.main()
-        
-        return 0
+        logger.info("Starting GTK4 application")
+        return run_gtk4_app(config)
         
     except (ImportError, Exception) as e:
-        logger.warning(f"GTK not available: {e}")
+        logger.warning(f"GTK4 not available: {e}")
         logger.info("Falling back to OpenCV-based UI")
         return run_opencv_gui(config)
 
