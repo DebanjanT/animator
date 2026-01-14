@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 """Demo script for video-to-skeleton animation with 3D viewer preview.
 
+Supports two pose estimation backends:
+1. Halpe 136 keypoints (AlphaPose/MediaPipe hybrid) - more accurate full body
+2. MediaPipe 33 keypoints - original mode
+
 Usage:
-    # From video file:
-    python demo_viewer.py --video path/to/video.mp4 --model "downloaded fbx/mixamo-t-Pose.fbx"
+    # Using Halpe mode (recommended):
+    python demo_viewer.py --video path/to/video.mp4 --model "downloaded fbx/mixamo-t-Pose.fbx" --halpe
     
-    # From camera:
-    python demo_viewer.py --camera 0 --model "downloaded fbx/mixamo-t-Pose.fbx"
+    # Using pre-processed AlphaPose JSON:
+    python demo_viewer.py --video path/to/video.mp4 --model "model.fbx" --halpe --poses poses.json
+    
+    # Legacy MediaPipe mode:
+    python demo_viewer.py --video path/to/video.mp4 --model "downloaded fbx/mixamo-t-Pose.fbx"
     
     # Viewer only (no pose estimation):
     python demo_viewer.py --model "downloaded fbx/mixamo-t-Pose.fbx"
@@ -824,11 +831,110 @@ def run_with_camera(model_path: str, camera_index: int):
         viewer.stop()
 
 
+def run_with_halpe(model_path: str, video_path: str, poses_json: str = None):
+    """Process video using Halpe 136-keypoint estimation."""
+    import cv2
+    import numpy as np
+    import mocap_viewer_py
+    
+    # Import Halpe estimator
+    try:
+        from src.pose.halpe_estimator import HalpeEstimator
+        from src.pose.alphapose_estimator import convert_halpe_to_mixamo
+        HALPE_AVAILABLE = True
+    except ImportError as e:
+        print(f"Warning: Halpe estimator not available: {e}")
+        HALPE_AVAILABLE = False
+        return
+    
+    # Initialize viewer
+    viewer = mocap_viewer_py.MoCapViewer(1280, 720, "Halpe Full-Body Animation")
+    if not viewer.initialize():
+        print("Failed to initialize viewer")
+        return
+        
+    viewer.load_model(model_path)
+    viewer.run_async()
+    
+    # Open video
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print(f"Failed to open video: {video_path}")
+        return
+        
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    frame_time = 1.0 / fps
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    print(f"Processing video at {fps:.1f} FPS ({frame_width}x{frame_height})...")
+    print("Close viewer window or press ESC to quit.")
+    
+    # Initialize Halpe estimator
+    print("Initializing Halpe 136-keypoint estimator...")
+    estimator = HalpeEstimator(json_path=poses_json, use_mediapipe_fallback=True)
+    
+    frame_count = 0
+    first_bone_log = True
+    
+    try:
+        while True:
+            if not viewer.run_one_frame():
+                break
+            
+            ret, frame = cap.read()
+            if not ret:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                frame_count = 0
+                continue
+            
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            timestamp = frame_count / fps
+            
+            # Get Halpe pose
+            pose = estimator.process(frame_rgb, timestamp)
+            
+            if pose and pose.is_valid:
+                # Convert to Mixamo bone transforms
+                bone_data = convert_halpe_to_mixamo(pose, frame_width, frame_height)
+                
+                if bone_data:
+                    if first_bone_log:
+                        print(f"Sending {len(bone_data)} bones to viewer:")
+                        for name in sorted(bone_data.keys())[:15]:
+                            print(f"  {name}")
+                        if len(bone_data) > 15:
+                            print(f"  ... and {len(bone_data) - 15} more")
+                        first_bone_log = False
+                    
+                    viewer.set_animation_frame(bone_data)
+                
+                # Draw pose on frame
+                display_frame = estimator.draw_pose(frame, pose, draw_hands=True, draw_labels=True)
+            else:
+                display_frame = frame
+            
+            # Show video with pose overlay
+            cv2.imshow('Halpe Pose - Press Q to quit', display_frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+            
+            frame_count += 1
+            time.sleep(max(0, frame_time - 0.02))
+            
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
+        viewer.stop()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Video to Skeleton Animation Demo")
     parser.add_argument("--video", type=str, help="Path to video file")
     parser.add_argument("--camera", type=int, default=None, help="Camera index (0 for default)")
     parser.add_argument("--model", type=str, required=True, help="Path to Mixamo FBX model")
+    parser.add_argument("--halpe", action="store_true", help="Use Halpe 136-keypoint mode")
+    parser.add_argument("--poses", type=str, help="Path to pre-processed AlphaPose JSON")
     args = parser.parse_args()
     
     # Resolve model path
@@ -851,7 +957,17 @@ def main():
                 print(f"Error: Video not found: {video_path}")
                 sys.exit(1)
             print(f"Processing video: {video_path}")
-            run_with_video(str(model_path), str(video_path))
+            
+            # Choose estimation mode
+            if args.halpe:
+                print("Using Halpe 136-keypoint mode (full body + hands)")
+                poses_path = args.poses
+                if poses_path:
+                    poses_path = str(Path(poses_path).resolve())
+                run_with_halpe(str(model_path), str(video_path), poses_path)
+            else:
+                print("Using MediaPipe 33-keypoint mode")
+                run_with_video(str(model_path), str(video_path))
             
         elif args.camera is not None:
             print(f"Starting camera capture (camera {args.camera})...")
