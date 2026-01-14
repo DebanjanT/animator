@@ -1,0 +1,62 @@
+# Motion Capture Configuration
+# ============================
+
+app:
+  name: "MoCap to UE5"
+  version: "0.1.0"
+  log_level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+
+video:
+  source: "webcam"  # "webcam" or path to video file
+  camera_id: 0
+  width: 1280
+  height: 720
+  fps: 30
+  buffer_size: 5
+
+pose_estimation:
+  model: "mediapipe"  # mediapipe, videopose3d
+  min_detection_confidence: 0.5
+  min_tracking_confidence: 0.5
+  smooth_landmarks: true
+
+pose_3d:
+  use_world_landmarks: true
+  temporal_smoothing: true
+  smoothing_window: 5
+  smoothing_method: "one_euro"  # one_euro, kalman, moving_average
+
+floor_detection:
+  enabled: true
+  ransac_iterations: 100
+  ransac_threshold: 0.02  # meters
+  min_samples: 10
+  update_interval: 30  # frames
+
+root_motion:
+  extract_root: true
+  lock_feet_threshold: 0.02  # meters
+  pelvis_height_offset: 0.0
+
+skeleton:
+  target: "ue5_mannequin"
+  apply_rest_pose: true
+  
+ik:
+  enabled: true
+  leg_ik: true
+  foot_locking: true
+  spine_smoothing: true
+  iterations: 10
+
+export:
+  format: "fbx"
+  output_dir: "./output"
+  fps: 30
+  coordinate_system: "ue5"  # ue5 uses Z-up, left-handed
+
+visualization:
+  enabled: true
+  show_skeleton: true
+  show_floor_plane: true
+  show_root_motion: true

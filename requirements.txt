@@ -1,0 +1,32 @@
+# Motion Capture to UE5 Animation - Dependencies
+# Python 3.10+
+
+# Core
+numpy>=1.24.0
+scipy>=1.10.0
+PyYAML>=6.0
+
+# Video Processing
+opencv-python>=4.8.0
+
+# Pose Estimation
+mediapipe>=0.10.0
+
+# 3D Math & Transforms
+transforms3d>=0.4.1
+
+# FBX Export (using Blender's Python API approach)
+# Note: For FBX SDK, install separately from Autodesk
+# Alternative: Use bpy (Blender as module) - requires separate installation
+
+# GTK UI
+PyGObject>=3.44.0
+
+# Visualization & Debugging
+matplotlib>=3.7.0
+
+# Temporal Smoothing
+filterpy>=1.4.5
+
+# Optional: GPU acceleration
+# tensorflow>=2.13.0  # Uncomment if using TF-based pose models
