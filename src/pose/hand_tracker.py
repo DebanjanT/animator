@@ -255,12 +255,16 @@ class HandTracker:
         Process a frame and extract hand landmarks.
         
         Args:
-            frame: RGB image (H, W, 3)
+            frame: RGB image (H, W, 3) - already converted by video capture
             timestamp: Frame timestamp in seconds
         
         Returns:
             HandsData with detected hands
         """
+        # Ensure contiguous array (frame should already be RGB from video capture)
+        if not frame.flags['C_CONTIGUOUS']:
+            frame = np.ascontiguousarray(frame)
+        
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame)
         
         timestamp_ms = int(timestamp * 1000)

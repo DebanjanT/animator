@@ -332,12 +332,12 @@ class HalpeEstimator:
         """Add 68 face keypoints from FaceTracker."""
         try:
             face_data = self._face_tracker.process(frame, timestamp)
-            if not face_data or not face_data.is_valid:
+            if not face_data:
+                self.logger.debug("No face detected")
                 return
             
-            h, w = frame.shape[:2]
-            
             # Add all 68 face landmarks (indices 26-93 in Halpe)
+            added_count = 0
             for local_idx, face_lm in face_data.landmarks.items():
                 if local_idx < 68:
                     halpe_idx = FACE_KEYPOINT_START + local_idx
@@ -349,47 +349,61 @@ class HalpeEstimator:
                         z=face_lm.z,
                         confidence=face_lm.confidence
                     )
+                    added_count += 1
+            
+            if added_count > 0:
+                self.logger.debug(f"Added {added_count} face landmarks")
                     
         except Exception as e:
-            self.logger.debug(f"Face tracking error: {e}")
+            self.logger.warning(f"Face tracking error: {e}")
     
     def _add_hand_keypoints(self, frame: np.ndarray, pose: HalpePose, timestamp: float):
         """Add hand keypoints from MediaPipe hand tracker."""
         try:
             hands = self._mp_hand_tracker.process(frame, timestamp)
-            if not hands:
+            if not hands or not hands.has_hands:
+                self.logger.debug("No hands detected")
                 return
             
-            h, w = frame.shape[:2]
+            added_left = 0
+            added_right = 0
             
-            # Left hand
-            if hands.left_hand:
-                for i, joint in enumerate(hands.left_hand.joints):
-                    halpe_idx = LEFT_HAND_START + i
+            # Left hand - iterate over joints dict
+            if hands.left_hand and hands.left_hand.joints:
+                for joint_name, joint in hands.left_hand.joints.items():
+                    # Map joint name to index
+                    joint_idx = joint.index if hasattr(joint, 'index') else 0
+                    halpe_idx = LEFT_HAND_START + joint_idx
                     pose.keypoints[halpe_idx] = HalpeKeypoint(
                         index=halpe_idx,
-                        name=f"left_{HALPE_HAND_NAMES.get(HalpeHandIndex(i), f'h{i}')}",
+                        name=f"left_{joint_name}",
                         x=joint.x,
                         y=joint.y,
                         z=joint.z if hasattr(joint, 'z') else 0.0,
-                        confidence=joint.confidence
+                        confidence=joint.confidence if hasattr(joint, 'confidence') else 1.0
                     )
+                    added_left += 1
             
-            # Right hand
-            if hands.right_hand:
-                for i, joint in enumerate(hands.right_hand.joints):
-                    halpe_idx = RIGHT_HAND_START + i
+            # Right hand - iterate over joints dict
+            if hands.right_hand and hands.right_hand.joints:
+                for joint_name, joint in hands.right_hand.joints.items():
+                    joint_idx = joint.index if hasattr(joint, 'index') else 0
+                    halpe_idx = RIGHT_HAND_START + joint_idx
                     pose.keypoints[halpe_idx] = HalpeKeypoint(
                         index=halpe_idx,
-                        name=f"right_{HALPE_HAND_NAMES.get(HalpeHandIndex(i), f'h{i}')}",
+                        name=f"right_{joint_name}",
                         x=joint.x,
                         y=joint.y,
                         z=joint.z if hasattr(joint, 'z') else 0.0,
-                        confidence=joint.confidence
+                        confidence=joint.confidence if hasattr(joint, 'confidence') else 1.0
                     )
+                    added_right += 1
+            
+            if added_left > 0 or added_right > 0:
+                self.logger.debug(f"Added hands: left={added_left}, right={added_right}")
                     
         except Exception as e:
-            self.logger.debug(f"Hand tracking error: {e}")
+            self.logger.warning(f"Hand tracking error: {e}")
     
     def draw_pose(
         self,

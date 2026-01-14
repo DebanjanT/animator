@@ -84,7 +84,7 @@ class FaceData:
     
     @property
     def is_valid(self) -> bool:
-        return len(self.landmarks) >= 68 and self.confidence > 0.5
+        return len(self.landmarks) >= 10  # At least some face landmarks detected
     
     def get_landmark(self, index: int) -> Optional[FaceLandmark]:
         return self.landmarks.get(index)
@@ -157,12 +157,16 @@ class FaceTracker:
         Process frame and extract face landmarks.
         
         Args:
-            frame: RGB image (H, W, 3)
+            frame: RGB image (H, W, 3) - already converted by video capture
             timestamp: Frame timestamp in seconds
         
         Returns:
             FaceData with 68 landmarks or None
         """
+        # Ensure contiguous array (frame should already be RGB from video capture)
+        if not frame.flags['C_CONTIGUOUS']:
+            frame = np.ascontiguousarray(frame)
+        
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame)
         
         timestamp_ms = int(timestamp * 1000)
