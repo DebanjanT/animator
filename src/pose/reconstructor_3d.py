@@ -10,7 +10,7 @@ from mediapipe.tasks import python as mp_tasks
 from mediapipe.tasks.python import vision as mp_vision
 
 from src.core import get_logger, Config
-from .estimator_2d import JointIndex, JOINT_NAMES, Pose2D, Joint2D, download_model_if_needed
+from .estimator_2d import JointIndex, JOINT_NAMES, Pose2D, Joint2D, download_model_if_needed, MODEL_DIR
 
 
 @dataclass
@@ -193,10 +193,10 @@ class MovingAverageFilter:
 
 class PoseReconstructor3D:
     """
-    3D pose reconstruction using MediaPipe PoseLandmarker.
+    3D pose reconstruction using shared pose detection results.
     
     Features:
-    - Single-camera depth inference via world landmarks
+    - Reuses pose detection from PoseEstimator2D (no duplicate inference)
     - Temporal smoothing (One Euro, Moving Average)
     - Stable 3D joint coordinates in meters
     """
@@ -205,27 +205,12 @@ class PoseReconstructor3D:
         self.logger = get_logger("pose.3d")
         self.config = config or Config()
         
-        pose_config = self.config.pose_estimation
         pose_3d_config = self.config.pose_3d
         
         self._use_world_landmarks = pose_3d_config.get("use_world_landmarks", True)
         self._temporal_smoothing = pose_3d_config.get("temporal_smoothing", True)
         self._smoothing_window = pose_3d_config.get("smoothing_window", 5)
         self._smoothing_method = pose_3d_config.get("smoothing_method", "one_euro")
-        
-        model_path = download_model_if_needed()
-        
-        base_options = mp_tasks.BaseOptions(model_asset_path=str(model_path))
-        options = mp_vision.PoseLandmarkerOptions(
-            base_options=base_options,
-            running_mode=mp_vision.RunningMode.VIDEO,
-            num_poses=1,
-            min_pose_detection_confidence=pose_config.get("min_detection_confidence", 0.5),
-            min_tracking_confidence=pose_config.get("min_tracking_confidence", 0.5),
-            output_segmentation_masks=False
-        )
-        
-        self._pose = mp_vision.PoseLandmarker.create_from_options(options)
         
         self._joint_filters: Dict[str, OneEuroFilter] = {}
         if self._temporal_smoothing:
@@ -243,6 +228,7 @@ class PoseReconstructor3D:
         self._frame_count = 0
         self._pose_history: List[Pose3D] = []
         self._max_history = 300
+        self._last_pose_3d: Optional[Pose3D] = None
         
         self.logger.info(
             f"Initialized 3D reconstructor (world_landmarks={self._use_world_landmarks}, "

@@ -4,10 +4,10 @@
 app:
   name: "MoCap to UE5"
   version: "0.1.0"
-  log_level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  log_level: "INFO" # DEBUG, INFO, WARNING, ERROR
 
 video:
-  source: "webcam"  # "webcam" or path to video file
+  source: "webcam" # "webcam" or path to video file
   camera_id: 0
   width: 1280
   height: 720
@@ -15,33 +15,41 @@ video:
   buffer_size: 5
 
 pose_estimation:
-  model: "mediapipe"  # mediapipe, videopose3d
+  model: "mediapipe" # mediapipe, videopose3d
+  model_type: "heavy" # lite, full, heavy (heavy = best accuracy, slower)
   min_detection_confidence: 0.5
   min_tracking_confidence: 0.5
   smooth_landmarks: true
+
+hand_tracking:
+  enabled: false # Set to true for finger tracking (reduces FPS)
+  max_hands: 2
+  min_detection_confidence: 0.5
+  min_tracking_confidence: 0.5
+  skip_frames: 2 # Process hands every N frames (higher = faster)
 
 pose_3d:
   use_world_landmarks: true
   temporal_smoothing: true
   smoothing_window: 5
-  smoothing_method: "one_euro"  # one_euro, kalman, moving_average
+  smoothing_method: "one_euro" # one_euro, kalman, moving_average
 
 floor_detection:
   enabled: true
   ransac_iterations: 100
-  ransac_threshold: 0.02  # meters
+  ransac_threshold: 0.02 # meters
   min_samples: 10
-  update_interval: 30  # frames
+  update_interval: 30 # frames
 
 root_motion:
   extract_root: true
-  lock_feet_threshold: 0.02  # meters
+  lock_feet_threshold: 0.02 # meters
   pelvis_height_offset: 0.0
 
 skeleton:
   target: "ue5_mannequin"
   apply_rest_pose: true
-  
+
 ik:
   enabled: true
   leg_ik: true
@@ -53,7 +61,7 @@ export:
   format: "fbx"
   output_dir: "./output"
   fps: 30
-  coordinate_system: "ue5"  # ue5 uses Z-up, left-handed
+  coordinate_system: "ue5" # ue5 uses Z-up, left-handed
 
 visualization:
   enabled: true

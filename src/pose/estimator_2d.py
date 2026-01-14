@@ -196,20 +196,44 @@ class Pose2D:
         return arr
 
 
-MODEL_URL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
-MODEL_PATH = Path(__file__).parent.parent.parent / "models" / "pose_landmarker.task"
+POSE_MODELS = {
+    "lite": {
+        "url": "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+        "filename": "pose_landmarker_lite.task"
+    },
+    "full": {
+        "url": "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task",
+        "filename": "pose_landmarker_full.task"
+    },
+    "heavy": {
+        "url": "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task",
+        "filename": "pose_landmarker_heavy.task"
+    }
+}
+
+MODEL_DIR = Path(__file__).parent.parent.parent / "models"
 
 
-def download_model_if_needed() -> Path:
-    """Download the pose landmarker model if not present."""
-    MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+def download_model_if_needed(model_type: str = "heavy") -> Path:
+    """Download the pose landmarker model if not present.
     
-    if not MODEL_PATH.exists():
-        print(f"Downloading pose model to {MODEL_PATH}...")
-        urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+    Args:
+        model_type: "lite", "full", or "heavy" (default: heavy for best accuracy)
+    """
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    
+    if model_type not in POSE_MODELS:
+        model_type = "heavy"
+    
+    model_info = POSE_MODELS[model_type]
+    model_path = MODEL_DIR / model_info["filename"]
+    
+    if not model_path.exists():
+        print(f"Downloading {model_type} pose model to {model_path}...")
+        urllib.request.urlretrieve(model_info["url"], model_path)
         print("Download complete.")
     
-    return MODEL_PATH
+    return model_path
 
 
 class PoseEstimator2D:
@@ -217,9 +241,10 @@ class PoseEstimator2D:
     2D pose estimation using MediaPipe PoseLandmarker (Tasks API).
     
     Detects 33 body landmarks per frame with confidence scores.
+    Supports lite, full, and heavy models for different accuracy/speed tradeoffs.
     """
     
-    def __init__(self, config: Optional[Config] = None):
+    def __init__(self, config: Optional[Config] = None, model_type: str = None):
         self.logger = get_logger("pose.2d")
         self.config = config or Config()
         
@@ -228,7 +253,11 @@ class PoseEstimator2D:
         self._min_detection_confidence = pose_config.get("min_detection_confidence", 0.5)
         self._min_tracking_confidence = pose_config.get("min_tracking_confidence", 0.5)
         
-        model_path = download_model_if_needed()
+        if model_type is None:
+            model_type = pose_config.get("model_type", "heavy")
+        self._model_type = model_type
+        
+        model_path = download_model_if_needed(model_type)
         
         base_options = mp_tasks.BaseOptions(model_asset_path=str(model_path))
         options = mp_vision.PoseLandmarkerOptions(
@@ -247,8 +276,8 @@ class PoseEstimator2D:
         self._max_history = 300  # 10 seconds at 30fps
         
         self.logger.info(
-            f"Initialized MediaPipe PoseLandmarker (detection={self._min_detection_confidence}, "
-            f"tracking={self._min_tracking_confidence})"
+            f"Initialized MediaPipe PoseLandmarker [{model_type}] "
+            f"(detection={self._min_detection_confidence}, tracking={self._min_tracking_confidence})"
         )
     
     def process(self, frame: np.ndarray, timestamp: float = 0.0) -> Optional[Pose2D]:
