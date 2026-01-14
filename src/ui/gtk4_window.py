@@ -20,6 +20,8 @@ from src.video.capture import VideoCapture, CaptureState
 from src.pose.unified_processor import UnifiedPoseProcessor
 from src.pose.reconstructor_3d import Pose3D
 from src.pose.hand_tracker import HandTracker, HandsData
+from src.pose.halpe_estimator import HalpeEstimator
+from src.pose.alphapose_estimator import convert_halpe_to_mixamo
 from src.motion.floor_detector import FloorDetector
 from src.motion.root_motion import RootMotionExtractor
 from src.motion.skeleton_solver import SkeletonSolver, SkeletonPose
@@ -86,6 +88,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._video_capture: Optional[VideoCapture] = None
         self._pose_processor: Optional[UnifiedPoseProcessor] = None
         self._hand_tracker: Optional[HandTracker] = None
+        self._halpe_estimator: Optional[HalpeEstimator] = None
         self._floor_detector: Optional[FloorDetector] = None
         self._root_motion: Optional[RootMotionExtractor] = None
         self._skeleton_solver: Optional[SkeletonSolver] = None
@@ -108,6 +111,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self._enable_ik = True
         self._enable_floor = True
         self._enable_hands = config.get("hand_tracking", {}).get("enabled", False)
+        self._enable_halpe = True  # Use Halpe 136-keypoint estimation
+        self._enable_face = True   # Enable 68 face landmarks
         
         self._current_frame: Optional[np.ndarray] = None
         self._current_pose_3d = None
@@ -215,6 +220,12 @@ class MainWindow(Gtk.ApplicationWindow):
         settings_label = Gtk.Label(label="Quick Settings")
         settings_label.add_css_class("heading")
         settings_box.append(settings_label)
+        
+        self._halpe_switch = self._create_switch_row("Halpe 136 Mode", self._enable_halpe)
+        settings_box.append(self._halpe_switch)
+        
+        self._face_switch = self._create_switch_row("Face Tracking (68pts)", self._enable_face)
+        settings_box.append(self._face_switch)
         
         self._skeleton_switch = self._create_switch_row("Show Skeleton", self._show_skeleton)
         settings_box.append(self._skeleton_switch)
@@ -416,12 +427,27 @@ class MainWindow(Gtk.ApplicationWindow):
             self._enable_hands = self._hands_switch.switch.get_active()
             self._show_3d_view = self._3d_switch.switch.get_active()
             self._enable_ik = self._ik_switch.switch.get_active()
+            self._enable_halpe = self._halpe_switch.switch.get_active()
+            self._enable_face = self._face_switch.switch.get_active()
             
-            model_type = self.config.get("pose_estimation", {}).get("model_type", "full")
-            self._pose_processor = UnifiedPoseProcessor(self.config, model_type=model_type)
-            
-            if self._enable_hands:
-                self._hand_tracker = HandTracker(self.config)
+            if self._enable_halpe:
+                # Use Halpe 136-keypoint estimator (body + face + hands)
+                self.logger.info("Initializing Halpe 136-keypoint estimator...")
+                self._halpe_estimator = HalpeEstimator(
+                    self.config,
+                    enable_face=self._enable_face,
+                    enable_hands=self._enable_hands
+                )
+                self._pose_processor = None
+                self._hand_tracker = None
+            else:
+                # Use legacy MediaPipe pose processor
+                model_type = self.config.get("pose_estimation", {}).get("model_type", "full")
+                self._pose_processor = UnifiedPoseProcessor(self.config, model_type=model_type)
+                self._halpe_estimator = None
+                
+                if self._enable_hands:
+                    self._hand_tracker = HandTracker(self.config)
             
             self._floor_detector = FloorDetector(self.config)
             self._root_motion = RootMotionExtractor(self.config)
@@ -430,7 +456,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self._fbx_exporter = FBXExporter(self.config)
             self._skeleton_viewer = SkeletonViewer3D(self.config, width=330, height=330)
             
-            self.logger.info("Pipeline initialized")
+            self.logger.info(f"Pipeline initialized (halpe={self._enable_halpe}, face={self._enable_face})")
             
         except Exception as e:
             self.logger.error(f"Failed to initialize pipeline: {e}")
@@ -860,6 +886,7 @@ class MainWindow(Gtk.ApplicationWindow):
         """Main processing loop (runs in separate thread)."""
         frame_count = 0
         last_hands_data = None
+        last_halpe_pose = None
         
         while not self._stop_processing.is_set():
             if self._video_capture is None or not self._video_capture.is_playing:
@@ -878,18 +905,48 @@ class MainWindow(Gtk.ApplicationWindow):
             frame = frame_result.frame
             timestamp = frame_result.timestamp
             
-            result = self._pose_processor.process(frame, timestamp)
-            pose_2d = result.pose_2d if result else None
-            pose_3d = result.pose_3d if result else None
-            
+            pose_2d = None
+            pose_3d = None
+            halpe_pose = None
             hands_data = None
-            if self._enable_hands and self._hand_tracker:
-                if frame_count % 2 == 0:
-                    hands_data = self._hand_tracker.process(frame, timestamp)
-                    last_hands_data = hands_data
-                else:
-                    hands_data = last_hands_data
             
+            if self._enable_halpe and self._halpe_estimator:
+                # Use Halpe 136-keypoint estimation
+                halpe_pose = self._halpe_estimator.process(frame, timestamp)
+                last_halpe_pose = halpe_pose
+                
+                # Draw Halpe pose (body + face + hands)
+                if halpe_pose:
+                    display_frame = self._halpe_estimator.draw_pose(
+                        frame.copy(), halpe_pose,
+                        draw_body=self._show_skeleton,
+                        draw_face=self._enable_face,
+                        draw_hands=self._enable_hands,
+                        draw_labels=False
+                    )
+                else:
+                    display_frame = frame.copy()
+            else:
+                # Use legacy pose processor
+                result = self._pose_processor.process(frame, timestamp)
+                pose_2d = result.pose_2d if result else None
+                pose_3d = result.pose_3d if result else None
+                
+                if self._enable_hands and self._hand_tracker:
+                    if frame_count % 2 == 0:
+                        hands_data = self._hand_tracker.process(frame, timestamp)
+                        last_hands_data = hands_data
+                    else:
+                        hands_data = last_hands_data
+                
+                display_frame = frame.copy()
+                if self._show_skeleton and pose_2d:
+                    display_frame = self._pose_processor.draw_pose(display_frame, pose_2d)
+                
+                if self._show_hands and hands_data and self._hand_tracker:
+                    display_frame = self._hand_tracker.draw_hands(display_frame, hands_data)
+            
+            # Process skeleton for recording/export (legacy mode only for now)
             skeleton_pose = None
             if pose_3d and pose_3d.is_valid:
                 self._current_pose_3d = pose_3d
@@ -911,21 +968,15 @@ class MainWindow(Gtk.ApplicationWindow):
                 if self._is_recording and skeleton_pose:
                     self._recorded_poses.append(skeleton_pose)
             
-            display_frame = frame.copy()
-            if self._show_skeleton and pose_2d:
-                display_frame = self._pose_processor.draw_pose(display_frame, pose_2d)
-            
-            if self._show_hands and hands_data and self._hand_tracker:
-                display_frame = self._hand_tracker.draw_hands(display_frame, hands_data)
-            
             self._frame_timer.stop()
             frame_count += 1
             
-            GLib.idle_add(self._update_display, display_frame, pose_2d)
+            # Pass halpe_pose for display info
+            GLib.idle_add(self._update_display, display_frame, pose_2d, halpe_pose)
         
         self.logger.info("Processing loop ended")
     
-    def _update_display(self, frame: np.ndarray, pose_2d) -> bool:
+    def _update_display(self, frame: np.ndarray, pose_2d, halpe_pose=None) -> bool:
         """Update display (called from main thread)."""
         h, w = frame.shape[:2]
         display_w, display_h = 960, 540
@@ -947,7 +998,14 @@ class MainWindow(Gtk.ApplicationWindow):
         
         self._fps_label.set_label(f"FPS: {self._frame_timer.fps:.1f}")
         
-        if pose_2d:
+        if halpe_pose:
+            # Count visible keypoints by category
+            body_count = sum(1 for i in range(26) if i in halpe_pose.keypoints and halpe_pose.keypoints[i].is_visible)
+            face_count = sum(1 for i in range(26, 94) if i in halpe_pose.keypoints and halpe_pose.keypoints[i].is_visible)
+            hand_count = sum(1 for i in range(94, 136) if i in halpe_pose.keypoints and halpe_pose.keypoints[i].is_visible)
+            total = body_count + face_count + hand_count
+            self._pose_label.set_label(f"Halpe: {total}/136 (body:{body_count} face:{face_count} hands:{hand_count})")
+        elif pose_2d:
             self._pose_label.set_label(f"Pose: {pose_2d.num_visible_joints}/33 joints")
         else:
             self._pose_label.set_label("Pose: Not detected")

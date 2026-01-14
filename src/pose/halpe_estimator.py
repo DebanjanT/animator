@@ -21,7 +21,7 @@ from src.pose.halpe_keypoints import (
     HALPE_BODY_NAMES, HALPE_HAND_NAMES,
     HALPE_BODY_CONNECTIONS, HALPE_HAND_CONNECTIONS,
     LEFT_HAND_START, RIGHT_HAND_START,
-    FACE_KEYPOINT_START,
+    FACE_KEYPOINT_START, FACE_KEYPOINT_END,
 )
 from src.pose.alphapose_estimator import HalpeKeypoint, HalpePose, convert_halpe_to_mixamo
 
@@ -211,19 +211,25 @@ class MediaPipeToHalpeConverter:
 
 class HalpeEstimator:
     """
-    Real-time Halpe pose estimator with multiple backends.
+    Real-time Halpe 136-keypoint pose estimator with full body, face, and hands.
+    
+    Provides:
+    - 26 body keypoints
+    - 68 face keypoints (from MediaPipe FaceMesh)
+    - 21 left hand + 21 right hand keypoints
     
     Priority order:
     1. Pre-loaded AlphaPose JSON (if available)
-    2. ONNX model inference (if model available)
-    3. MediaPipe conversion fallback
+    2. MediaPipe combination (pose + face + hands)
     """
     
     def __init__(
         self,
         config: Optional[Config] = None,
         json_path: Optional[str] = None,
-        use_mediapipe_fallback: bool = True
+        use_mediapipe_fallback: bool = True,
+        enable_face: bool = True,
+        enable_hands: bool = True
     ):
         self.logger = get_logger("pose.halpe")
         self.config = config or Config()
@@ -231,7 +237,10 @@ class HalpeEstimator:
         self._json_loader: Optional[HalpePoseLoader] = None
         self._mp_estimator = None
         self._mp_hand_tracker = None
+        self._face_tracker = None
         self._frame_count = 0
+        self._enable_face = enable_face
+        self._enable_hands = enable_hands
         
         # Load JSON if provided
         if json_path and Path(json_path).exists():
@@ -244,20 +253,35 @@ class HalpeEstimator:
         
         self.logger.info(
             f"Initialized Halpe estimator (json={json_path is not None}, "
-            f"mediapipe={self._mp_estimator is not None})"
+            f"body={self._mp_estimator is not None}, "
+            f"face={self._face_tracker is not None}, "
+            f"hands={self._mp_hand_tracker is not None})"
         )
     
     def _init_mediapipe(self):
-        """Initialize MediaPipe for fallback."""
+        """Initialize MediaPipe for body, face, and hands."""
         try:
             from src.pose.estimator_2d import PoseEstimator2D
-            from src.pose.hand_tracker import HandTracker
-            
             self._mp_estimator = PoseEstimator2D(model_type="heavy")
-            self._mp_hand_tracker = HandTracker()
-            self.logger.info("MediaPipe fallback initialized")
+            self.logger.info("Body pose estimator initialized")
         except Exception as e:
-            self.logger.warning(f"Could not initialize MediaPipe: {e}")
+            self.logger.warning(f"Could not initialize pose estimator: {e}")
+        
+        if self._enable_face:
+            try:
+                from src.pose.face_tracker import FaceTracker
+                self._face_tracker = FaceTracker(self.config)
+                self.logger.info("Face tracker initialized (68 landmarks)")
+            except Exception as e:
+                self.logger.warning(f"Could not initialize face tracker: {e}")
+        
+        if self._enable_hands:
+            try:
+                from src.pose.hand_tracker import HandTracker
+                self._mp_hand_tracker = HandTracker(self.config)
+                self.logger.info("Hand tracker initialized (42 landmarks)")
+            except Exception as e:
+                self.logger.warning(f"Could not initialize hand tracker: {e}")
     
     def process(
         self,
@@ -289,15 +313,45 @@ class HalpeEstimator:
                     mp_pose, self._frame_count, timestamp
                 )
                 
-                # Add hand keypoints if tracker available
-                if self._mp_hand_tracker and halpe_pose:
-                    self._add_hand_keypoints(frame, halpe_pose, timestamp)
+                if halpe_pose:
+                    # Add face keypoints (68 landmarks)
+                    if self._face_tracker:
+                        self._add_face_keypoints(frame, halpe_pose, timestamp)
+                    
+                    # Add hand keypoints (42 landmarks total)
+                    if self._mp_hand_tracker:
+                        self._add_hand_keypoints(frame, halpe_pose, timestamp)
                 
                 self._frame_count += 1
                 return halpe_pose
         
         self._frame_count += 1
         return None
+    
+    def _add_face_keypoints(self, frame: np.ndarray, pose: HalpePose, timestamp: float):
+        """Add 68 face keypoints from FaceTracker."""
+        try:
+            face_data = self._face_tracker.process(frame, timestamp)
+            if not face_data or not face_data.is_valid:
+                return
+            
+            h, w = frame.shape[:2]
+            
+            # Add all 68 face landmarks (indices 26-93 in Halpe)
+            for local_idx, face_lm in face_data.landmarks.items():
+                if local_idx < 68:
+                    halpe_idx = FACE_KEYPOINT_START + local_idx
+                    pose.keypoints[halpe_idx] = HalpeKeypoint(
+                        index=halpe_idx,
+                        name=f"face_{local_idx}",
+                        x=face_lm.x,
+                        y=face_lm.y,
+                        z=face_lm.z,
+                        confidence=face_lm.confidence
+                    )
+                    
+        except Exception as e:
+            self.logger.debug(f"Face tracking error: {e}")
     
     def _add_hand_keypoints(self, frame: np.ndarray, pose: HalpePose, timestamp: float):
         """Add hand keypoints from MediaPipe hand tracker."""
@@ -415,13 +469,49 @@ class HalpeEstimator:
                     pt = to_pixel(kpt)
                     cv2.circle(result, pt, 3, RIGHT_HAND_COLOR, -1)
         
-        # Draw face keypoints
+        # Draw face keypoints with contours
         if draw_face:
-            for i in range(FACE_KEYPOINT_START, 94):
+            # Face contour connections for 68 landmarks
+            FACE_CONTOURS = [
+                list(range(26, 43)),  # Jaw (0-16)
+                list(range(43, 48)),  # Left eyebrow (17-21)
+                list(range(48, 53)),  # Right eyebrow (22-26)
+                list(range(53, 57)),  # Nose bridge (27-30)
+                [57, 58, 59, 60, 61, 57],  # Nose tip (31-35)
+                [62, 63, 64, 65, 66, 67, 62],  # Left eye (36-41)
+                [68, 69, 70, 71, 72, 73, 68],  # Right eye (42-47)
+                [74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 74],  # Outer lip
+                [86, 87, 88, 89, 90, 91, 92, 93, 86],  # Inner lip
+            ]
+            
+            # Draw face contours
+            for contour in FACE_CONTOURS:
+                for i in range(len(contour) - 1):
+                    kpt1 = pose.get_keypoint(contour[i])
+                    kpt2 = pose.get_keypoint(contour[i + 1])
+                    if kpt1 and kpt2 and kpt1.is_visible and kpt2.is_visible:
+                        pt1 = to_pixel(kpt1)
+                        pt2 = to_pixel(kpt2)
+                        cv2.line(result, pt1, pt2, FACE_COLOR, 1)
+            
+            # Draw all 68 face landmarks
+            for i in range(FACE_KEYPOINT_START, FACE_KEYPOINT_END + 1):
                 kpt = pose.get_keypoint(i)
                 if kpt and kpt.is_visible:
                     pt = to_pixel(kpt)
-                    cv2.circle(result, pt, 2, FACE_COLOR, -1)
+                    # Color code by face region
+                    local_idx = i - FACE_KEYPOINT_START
+                    if local_idx <= 16:
+                        color = (255, 200, 0)  # Jaw - cyan
+                    elif local_idx <= 26:
+                        color = (0, 255, 0)  # Eyebrows - green
+                    elif local_idx <= 35:
+                        color = (255, 0, 255)  # Nose - magenta
+                    elif local_idx <= 47:
+                        color = (255, 255, 0)  # Eyes - yellow
+                    else:
+                        color = (0, 0, 255)  # Lips - red
+                    cv2.circle(result, pt, 2, color, -1)
         
         # Draw info
         num_visible = sum(1 for kpt in pose.keypoints.values() if kpt.is_visible)
