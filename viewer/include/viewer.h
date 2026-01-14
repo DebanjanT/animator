@@ -74,6 +74,21 @@ private:
   // UI state
   bool showGrid;
   bool showImGuiDemo;
+  bool showGizmo;
+  
+  // Gizmo state
+  int gizmoOperation;  // ImGuizmo::OPERATION
+  int gizmoMode;       // ImGuizmo::MODE
+  glm::mat4 modelMatrix;
+  bool useSnap;
+  float snapTranslation[3];
+  float snapRotation;
+  float snapScale;
+  
+  // Ground plane
+  unsigned int groundPlaneVAO, groundPlaneVBO;
+  void setupGroundPlane();
+  void renderGroundPlane();
 
   void processInput();
   void render();

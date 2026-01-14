@@ -3,9 +3,12 @@
 #include <iostream>
 #include <thread>
 
+#include <glm/gtc/type_ptr.hpp>
+
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
+#include "ImGuizmo.h"
 
 static MoCapViewer *currentViewer = nullptr;
 
@@ -13,7 +16,14 @@ MoCapViewer::MoCapViewer(int width, int height, const std::string &title)
     : width(width), height(height), title(title), window(nullptr),
       backgroundColor(0.2f, 0.2f, 0.25f), running(false), lastX(width / 2.0f),
       lastY(height / 2.0f), firstMouse(true), deltaTime(0.0f), lastFrame(0.0f),
-      showGrid(true), showImGuiDemo(false) {}
+      showGrid(true), showImGuiDemo(false), showGizmo(true),
+      gizmoOperation(ImGuizmo::TRANSLATE), gizmoMode(ImGuizmo::WORLD),
+      modelMatrix(1.0f), useSnap(false), snapRotation(15.0f), snapScale(0.5f),
+      groundPlaneVAO(0), groundPlaneVBO(0) {
+  snapTranslation[0] = 1.0f;
+  snapTranslation[1] = 1.0f;
+  snapTranslation[2] = 1.0f;
+}
 
 MoCapViewer::~MoCapViewer() {
   stop();
@@ -212,6 +222,7 @@ void MoCapViewer::run() {
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
+    ImGuizmo::BeginFrame();
 
     processInput();
 
@@ -335,6 +346,61 @@ void MoCapViewer::renderImGui() {
       }
     }
 
+    // Transform Gizmo
+    if (ImGui::CollapsingHeader("Transform Gizmo", ImGuiTreeNodeFlags_DefaultOpen)) {
+      ImGui::Checkbox("Show Gizmo", &showGizmo);
+      
+      if (showGizmo) {
+        // Operation selection
+        if (ImGui::RadioButton("Translate", gizmoOperation == ImGuizmo::TRANSLATE))
+          gizmoOperation = ImGuizmo::TRANSLATE;
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Rotate", gizmoOperation == ImGuizmo::ROTATE))
+          gizmoOperation = ImGuizmo::ROTATE;
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Scale", gizmoOperation == ImGuizmo::SCALE))
+          gizmoOperation = ImGuizmo::SCALE;
+        
+        // Mode selection (not for scale)
+        if (gizmoOperation != ImGuizmo::SCALE) {
+          if (ImGui::RadioButton("Local", gizmoMode == ImGuizmo::LOCAL))
+            gizmoMode = ImGuizmo::LOCAL;
+          ImGui::SameLine();
+          if (ImGui::RadioButton("World", gizmoMode == ImGuizmo::WORLD))
+            gizmoMode = ImGuizmo::WORLD;
+        }
+        
+        // Snap settings
+        ImGui::Checkbox("Snap", &useSnap);
+        if (useSnap) {
+          if (gizmoOperation == ImGuizmo::TRANSLATE) {
+            ImGui::InputFloat3("Snap XYZ", snapTranslation);
+          } else if (gizmoOperation == ImGuizmo::ROTATE) {
+            ImGui::InputFloat("Angle Snap", &snapRotation);
+          } else if (gizmoOperation == ImGuizmo::SCALE) {
+            ImGui::InputFloat("Scale Snap", &snapScale);
+          }
+        }
+        
+        // Transform display
+        float translation[3], rotation[3], scale[3];
+        ImGuizmo::DecomposeMatrixToComponents(glm::value_ptr(modelMatrix), 
+                                               translation, rotation, scale);
+        bool changed = false;
+        changed |= ImGui::InputFloat3("Position", translation);
+        changed |= ImGui::InputFloat3("Rotation", rotation);
+        changed |= ImGui::InputFloat3("Scale", scale);
+        if (changed) {
+          ImGuizmo::RecomposeMatrixFromComponents(translation, rotation, scale,
+                                                   glm::value_ptr(modelMatrix));
+        }
+        
+        if (ImGui::Button("Reset Transform")) {
+          modelMatrix = glm::mat4(1.0f);
+        }
+      }
+    }
+    
     // Display Settings
     if (ImGui::CollapsingHeader("Display")) {
       ImGui::Checkbox("Show Grid", &showGrid);
@@ -477,7 +543,6 @@ void MoCapViewer::render() {
   if (model) {
     std::lock_guard<std::mutex> lock(dataMutex);
 
-    glm::mat4 modelMatrix = glm::mat4(1.0f);
     shader->setMat4("model", modelMatrix);
 
     // Enable skinning only if we have a valid animation with actual bone data
@@ -495,10 +560,86 @@ void MoCapViewer::render() {
 
     model->draw(*shader);
   }
+  
+  // Render ImGuizmo gizmo
+  if (showGizmo && model) {
+    ImGuiIO& io = ImGui::GetIO();
+    ImGuizmo::SetRect(0, 0, io.DisplaySize.x, io.DisplaySize.y);
+    
+    glm::mat4 view = camera->getViewMatrix();
+    glm::mat4 proj = glm::perspective(glm::radians(camera->Zoom), 
+                                       (float)width / (float)height,
+                                       camera->getNearPlane(), 
+                                       camera->getFarPlane());
+    
+    float* snapPtr = nullptr;
+    if (useSnap) {
+      if (gizmoOperation == ImGuizmo::TRANSLATE) {
+        snapPtr = snapTranslation;
+      } else if (gizmoOperation == ImGuizmo::ROTATE) {
+        snapPtr = &snapRotation;
+      } else if (gizmoOperation == ImGuizmo::SCALE) {
+        snapPtr = &snapScale;
+      }
+    }
+    
+    ImGuizmo::Manipulate(glm::value_ptr(view), glm::value_ptr(proj),
+                         static_cast<ImGuizmo::OPERATION>(gizmoOperation),
+                         static_cast<ImGuizmo::MODE>(gizmoMode),
+                         glm::value_ptr(modelMatrix),
+                         nullptr, snapPtr);
+  }
 }
 
 void MoCapViewer::drawGrid() {
-  // Simple grid rendering would go here
+  // Generate grid vertices on first call
+  static unsigned int gridVAO = 0, gridVBO = 0;
+  static int gridVertexCount = 0;
+  
+  float gridSize = camera->ModelRadius * 2.0f;
+  int gridLines = 20;
+  float step = gridSize / gridLines;
+  float halfSize = gridSize / 2.0f;
+  
+  if (gridVAO == 0) {
+    std::vector<float> vertices;
+    
+    // Generate grid lines along X axis
+    for (int i = -gridLines; i <= gridLines; i++) {
+      float pos = i * step;
+      // Line along Z
+      vertices.push_back(-halfSize); vertices.push_back(0.0f); vertices.push_back(pos);
+      vertices.push_back(halfSize);  vertices.push_back(0.0f); vertices.push_back(pos);
+    }
+    
+    // Generate grid lines along Z axis
+    for (int i = -gridLines; i <= gridLines; i++) {
+      float pos = i * step;
+      // Line along X
+      vertices.push_back(pos); vertices.push_back(0.0f); vertices.push_back(-halfSize);
+      vertices.push_back(pos); vertices.push_back(0.0f); vertices.push_back(halfSize);
+    }
+    
+    gridVertexCount = vertices.size() / 3;
+    
+    glGenVertexArrays(1, &gridVAO);
+    glGenBuffers(1, &gridVBO);
+    glBindVertexArray(gridVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, gridVBO);
+    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(float), vertices.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glBindVertexArray(0);
+  }
+  
+  // Draw grid with depth test but write behind other objects
+  shader->setMat4("model", glm::mat4(1.0f));
+  shader->setBool("useSkinning", false);
+  shader->setVec3("objectColor", glm::vec3(0.4f, 0.4f, 0.45f));
+  
+  glBindVertexArray(gridVAO);
+  glDrawArrays(GL_LINES, 0, gridVertexCount);
+  glBindVertexArray(0);
 }
 
 void MoCapViewer::setBoneTransform(const std::string &boneName, float px,

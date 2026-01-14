@@ -23,12 +23,19 @@ set(IMGUI_SOURCES
     ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
 )
 
+# ImGuizmo source files
+set(IMGUIZMO_DIR ${CMAKE_SOURCE_DIR}/vendor/ImGuizmo-1.83)
+set(IMGUIZMO_SOURCES
+    ${IMGUIZMO_DIR}/ImGuizmo.cpp
+)
+
 # Include directories
 include_directories(
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/vendor/glad/include
     ${IMGUI_DIR}
     ${IMGUI_DIR}/backends
+    ${IMGUIZMO_DIR}
     /opt/homebrew/include
 )
 
@@ -47,6 +54,7 @@ set(VIEWER_SOURCES
     src/camera.cpp
     vendor/glad/src/gl.c
     ${IMGUI_SOURCES}
+    ${IMGUIZMO_SOURCES}
 )
 
 # Standalone executable
@@ -68,6 +76,7 @@ pybind11_add_module(mocap_viewer_py
     src/camera.cpp
     vendor/glad/src/gl.c
     ${IMGUI_SOURCES}
+    ${IMGUIZMO_SOURCES}
     src/python_bindings.cpp
 )
 target_link_libraries(mocap_viewer_py PRIVATE
