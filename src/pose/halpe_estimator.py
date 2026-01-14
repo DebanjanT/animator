@@ -229,7 +229,9 @@ class HalpeEstimator:
         json_path: Optional[str] = None,
         use_mediapipe_fallback: bool = True,
         enable_face: bool = True,
-        enable_hands: bool = True
+        enable_hands: bool = True,
+        enable_smoothing: bool = True,
+        smoothing_preset: str = "animation"
     ):
         self.logger = get_logger("pose.halpe")
         self.config = config or Config()
@@ -241,6 +243,13 @@ class HalpeEstimator:
         self._frame_count = 0
         self._enable_face = enable_face
         self._enable_hands = enable_hands
+        self._enable_smoothing = enable_smoothing
+        
+        # Initialize pose smoother
+        from src.pose.pose_smoother import PoseSmoother, SMOOTH_PRESETS
+        params = SMOOTH_PRESETS.get(smoothing_preset, SMOOTH_PRESETS["animation"])
+        self._pose_smoother = PoseSmoother(params)
+        self._pose_smoother.enabled = enable_smoothing
         
         # Load JSON if provided
         if json_path and Path(json_path).exists():
@@ -255,8 +264,27 @@ class HalpeEstimator:
             f"Initialized Halpe estimator (json={json_path is not None}, "
             f"body={self._mp_estimator is not None}, "
             f"face={self._face_tracker is not None}, "
-            f"hands={self._mp_hand_tracker is not None})"
+            f"hands={self._mp_hand_tracker is not None}, "
+            f"smoothing={enable_smoothing})"
         )
+    
+    def set_smoothing(self, enabled: bool, preset: str = None):
+        """Enable/disable smoothing or change preset at runtime."""
+        self._enable_smoothing = enabled
+        self._pose_smoother.enabled = enabled
+        
+        if preset:
+            from src.pose.pose_smoother import SMOOTH_PRESETS
+            if preset in SMOOTH_PRESETS:
+                self._pose_smoother.params = SMOOTH_PRESETS[preset]
+                self._pose_smoother.reset()
+                self.logger.info(f"Smoothing preset changed to: {preset}")
+        
+        self.logger.info(f"Smoothing {'enabled' if enabled else 'disabled'}")
+    
+    def reset_smoothing(self):
+        """Reset smoothing filters (call when switching videos/sources)."""
+        self._pose_smoother.reset()
     
     def _init_mediapipe(self):
         """Initialize MediaPipe for body, face, and hands."""
@@ -321,6 +349,12 @@ class HalpeEstimator:
                     # Add hand keypoints (42 landmarks total)
                     if self._mp_hand_tracker:
                         self._add_hand_keypoints(frame, halpe_pose, timestamp)
+                    
+                    # Apply smoothing to reduce jitter
+                    if self._enable_smoothing and self._pose_smoother:
+                        halpe_pose.keypoints = self._pose_smoother.smooth_pose(
+                            halpe_pose.keypoints, timestamp
+                        )
                 
                 self._frame_count += 1
                 return halpe_pose
