@@ -20,6 +20,12 @@ void Model::load(const std::string &path) {
   directory = path.substr(0, path.find_last_of('/'));
   processNode(scene->mRootNode, scene);
 
+  // Build bone hierarchy for display
+  if (boneCounter > 0) {
+    hasSkeleton = true;
+    buildBoneHierarchy(scene->mRootNode, rootBone);
+  }
+
   std::cout << "Model loaded: " << path << std::endl;
   std::cout << "  Meshes: " << meshes.size() << std::endl;
   std::cout << "  Bones: " << boneCounter << std::endl;
@@ -60,6 +66,8 @@ Mesh Model::processMesh(aiMesh *mesh, const aiScene *scene) {
     if (mesh->HasNormals()) {
       vertex.Normal = glm::vec3(mesh->mNormals[i].x, mesh->mNormals[i].y,
                                 mesh->mNormals[i].z);
+    } else {
+      vertex.Normal = glm::vec3(0.0f, 1.0f, 0.0f); // Default up normal
     }
 
     if (mesh->mTextureCoords[0]) {
@@ -86,6 +94,8 @@ Mesh Model::processMesh(aiMesh *mesh, const aiScene *scene) {
   std::cout << "  Bounding box: (" << minPos.x << ", " << minPos.y << ", "
             << minPos.z << ") to (" << maxPos.x << ", " << maxPos.y << ", "
             << maxPos.z << ")" << std::endl;
+  std::cout << "  Has normals: " << (mesh->HasNormals() ? "yes" : "no")
+            << std::endl;
 
   for (unsigned int i = 0; i < mesh->mNumFaces; i++) {
     aiFace face = mesh->mFaces[i];
@@ -155,4 +165,28 @@ std::vector<Texture> Model::loadMaterialTextures(aiMaterial *mat,
   std::vector<Texture> textures;
   // Texture loading would go here - simplified for now
   return textures;
+}
+
+static glm::mat4 convertMatrix(const aiMatrix4x4 &from) {
+  return glm::mat4(from.a1, from.b1, from.c1, from.d1, from.a2, from.b2,
+                   from.c2, from.d2, from.a3, from.b3, from.c3, from.d3,
+                   from.a4, from.b4, from.c4, from.d4);
+}
+
+void Model::buildBoneHierarchy(const aiNode *node, BoneNode &boneNode) {
+  boneNode.name = node->mName.C_Str();
+  boneNode.transform = convertMatrix(node->mTransformation);
+
+  // Check if this node is a bone
+  auto it = boneInfoMap.find(boneNode.name);
+  if (it != boneInfoMap.end()) {
+    boneNode.boneId = it->second.id;
+  }
+
+  // Recursively process children
+  for (unsigned int i = 0; i < node->mNumChildren; i++) {
+    BoneNode child;
+    buildBoneHierarchy(node->mChildren[i], child);
+    boneNode.children.push_back(child);
+  }
 }

@@ -69,6 +69,7 @@ private:
 
   // Model bounds for camera auto-framing
   BoundingBox modelBounds;
+  std::string modelPath;
 
   // UI state
   bool showGrid;
@@ -77,6 +78,7 @@ private:
   void processInput();
   void render();
   void renderImGui();
+  void renderBoneHierarchy(const BoneNode &node);
 
   static void framebufferSizeCallback(GLFWwindow *window, int width,
                                       int height);

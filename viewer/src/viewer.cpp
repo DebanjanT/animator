@@ -148,9 +148,20 @@ void MoCapViewer::setupShaders() {
         uniform vec3 objectColor;
 
         void main() {
-            // Simple debug: output solid color based on normal
-            vec3 norm = normalize(Normal);
-            vec3 color = norm * 0.5 + 0.5; // Map normal to RGB
+            vec3 norm = Normal;
+            float len = length(norm);
+            
+            vec3 color;
+            if (len > 0.001) {
+                // Valid normals - use colorful normal-based shading
+                norm = norm / len;
+                color = norm * 0.5 + 0.5; // Map normal to RGB (cyan/magenta look)
+            } else {
+                // Invalid/zero normals - use position-based coloring as fallback
+                vec3 posColor = normalize(FragPos) * 0.5 + 0.5;
+                color = mix(objectColor, posColor, 0.5);
+            }
+            
             FragColor = vec4(color, 1.0);
         }
     )";
@@ -163,6 +174,10 @@ void MoCapViewer::loadModel(const std::string &path) {
   std::lock_guard<std::mutex> lock(dataMutex);
   model = std::make_unique<Model>(path);
   animator->setModel(model.get());
+
+  // Load animation from the same FBX file
+  modelPath = path;
+  animator->loadAnimation(path, 0);
 
   // Compute bounding box from all meshes
   modelBounds = BoundingBox();
@@ -199,6 +214,10 @@ void MoCapViewer::run() {
     ImGui::NewFrame();
 
     processInput();
+
+    // Update animation
+    animator->updateAnimation(deltaTime);
+
     render();
     renderImGui();
 
@@ -272,6 +291,50 @@ void MoCapViewer::renderImGui() {
       ImGui::Text("Yaw: %.1f, Pitch: %.1f", camera->Yaw, camera->Pitch);
     }
 
+    // Animation Controls
+    if (ImGui::CollapsingHeader("Animation", ImGuiTreeNodeFlags_DefaultOpen)) {
+      Animation *anim = animator->getCurrentAnimation();
+      if (anim) {
+        ImGui::Text("Animation: %s", anim->getName().empty()
+                                         ? "Unnamed"
+                                         : anim->getName().c_str());
+        ImGui::Text("Duration: %.2f sec", animator->getDuration());
+
+        // Play/Pause/Stop buttons
+        if (animator->isPlaying()) {
+          if (ImGui::Button("Pause"))
+            animator->pause();
+        } else {
+          if (ImGui::Button("Play"))
+            animator->play();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Stop"))
+          animator->stop();
+
+        // Timeline slider
+        float progress = animator->getProgress();
+        if (ImGui::SliderFloat("Timeline", &progress, 0.0f, 1.0f)) {
+          float newTime = progress * anim->getDuration();
+          animator->setTime(newTime);
+        }
+
+        // Speed control
+        float speed = animator->getSpeed();
+        if (ImGui::SliderFloat("Speed", &speed, 0.0f, 3.0f)) {
+          animator->setSpeed(speed);
+        }
+
+        // Loop toggle
+        bool looping = animator->isLooping();
+        if (ImGui::Checkbox("Loop", &looping)) {
+          animator->setLooping(looping);
+        }
+      } else {
+        ImGui::Text("No animation loaded");
+      }
+    }
+
     // Display Settings
     if (ImGui::CollapsingHeader("Display")) {
       ImGui::Checkbox("Show Grid", &showGrid);
@@ -292,6 +355,61 @@ void MoCapViewer::renderImGui() {
     ImGui::Text("ESC - Quit");
   }
   ImGui::End();
+
+  // Skeleton Bones Hierarchy Window
+  ImGui::SetNextWindowPos(ImVec2(width - 260.0f, 200), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(ImVec2(250, 400), ImGuiCond_FirstUseEver);
+  if (ImGui::Begin("Skeleton Bones")) {
+    if (model && model->getHasSkeleton()) {
+      ImGui::Text("Bones: %d", model->getBoneCount());
+      ImGui::Separator();
+      renderBoneHierarchy(model->getRootBone());
+    } else if (model) {
+      ImGui::Text("Static Model (No Skeleton)");
+      ImGui::Text("Meshes: %zu", model->meshes.size());
+    } else {
+      ImGui::Text("No model loaded");
+    }
+  }
+  ImGui::End();
+}
+
+void MoCapViewer::renderBoneHierarchy(const BoneNode &node) {
+  // Determine if this is a bone (has valid bone ID) or just a scene node
+  bool isBone = node.boneId >= 0;
+
+  // Create tree node flags
+  ImGuiTreeNodeFlags flags =
+      ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick;
+  if (node.children.empty()) {
+    flags |= ImGuiTreeNodeFlags_Leaf;
+  }
+
+  // Format the node label
+  std::string label;
+  if (isBone) {
+    label = node.name + " [" + std::to_string(node.boneId) + "]";
+  } else {
+    label = node.name;
+  }
+
+  // Set color for bones vs regular nodes
+  if (isBone) {
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.8f, 1.0f, 1.0f));
+  }
+
+  bool isOpen = ImGui::TreeNodeEx(label.c_str(), flags);
+
+  if (isBone) {
+    ImGui::PopStyleColor();
+  }
+
+  if (isOpen) {
+    for (const auto &child : node.children) {
+      renderBoneHierarchy(child);
+    }
+    ImGui::TreePop();
+  }
 }
 
 void MoCapViewer::processInput() {
@@ -361,7 +479,19 @@ void MoCapViewer::render() {
 
     glm::mat4 modelMatrix = glm::mat4(1.0f);
     shader->setMat4("model", modelMatrix);
-    shader->setBool("useSkinning", false);
+
+    // Enable skinning only if we have a valid animation with actual bone data
+    Animation *anim = animator->getCurrentAnimation();
+    bool hasAnimation = anim && anim->isValid();
+    shader->setBool("useSkinning", hasAnimation);
+
+    if (hasAnimation) {
+      auto &boneMatrices = animator->getFinalBoneMatrices();
+      for (int i = 0; i < std::min(100, (int)boneMatrices.size()); i++) {
+        shader->setMat4("finalBonesMatrices[" + std::to_string(i) + "]",
+                        boneMatrices[i]);
+      }
+    }
 
     model->draw(*shader);
   }

@@ -43,6 +43,7 @@ set(VIEWER_SOURCES
     src/mesh.cpp
     src/model.cpp
     src/animator.cpp
+    src/animation.cpp
     src/camera.cpp
     vendor/glad/src/gl.c
     ${IMGUI_SOURCES}
@@ -63,6 +64,7 @@ pybind11_add_module(mocap_viewer_py
     src/mesh.cpp
     src/model.cpp
     src/animator.cpp
+    src/animation.cpp
     src/camera.cpp
     vendor/glad/src/gl.c
     ${IMGUI_SOURCES}

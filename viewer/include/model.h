@@ -15,6 +15,13 @@
 #include "mesh.h"
 #include "shader.h"
 
+struct BoneNode {
+  std::string name;
+  int boneId = -1;
+  glm::mat4 transform{1.0f};
+  std::vector<BoneNode> children;
+};
+
 class Model {
 public:
   std::vector<Texture> textures_loaded;
@@ -22,6 +29,9 @@ public:
   std::string directory;
   std::map<std::string, BoneInfo> boneInfoMap;
   int boneCounter = 0;
+
+  BoneNode rootBone;
+  bool hasSkeleton = false;
 
   Model() = default;
   Model(const std::string &path);
@@ -31,6 +41,8 @@ public:
 
   auto &getBoneInfoMap() { return boneInfoMap; }
   int &getBoneCount() { return boneCounter; }
+  const BoneNode &getRootBone() const { return rootBone; }
+  bool getHasSkeleton() const { return hasSkeleton; }
 
 private:
   void processNode(aiNode *node, const aiScene *scene);
@@ -42,6 +54,8 @@ private:
                                     const aiScene *scene);
   void setVertexBoneDataToDefault(Vertex &vertex);
   void setVertexBoneData(Vertex &vertex, int boneID, float weight);
+
+  void buildBoneHierarchy(const aiNode *node, BoneNode &boneNode);
 };
 
 #endif
