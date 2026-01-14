@@ -26,6 +26,7 @@ from src.motion.skeleton_solver import SkeletonSolver, SkeletonPose
 from src.ik.solver import IKSolver
 from src.export.fbx_exporter import FBXExporter
 from src.ui.skeleton_viewer import SkeletonViewer3D
+from src.ui.opengl_viewer import OpenGLViewer
 
 
 class AppState(Enum):
@@ -117,6 +118,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._preprocess_total = 0
         self._preprocess_thread: Optional[threading.Thread] = None
         self._frame_count = 0
+        self._opengl_viewer: Optional[OpenGLViewer] = None
         
         self._setup_ui()
         self.logger.info("GTK4 Main window initialized")
@@ -376,6 +378,26 @@ class MainWindow(Gtk.ApplicationWindow):
         
         export_frame.set_child(export_box)
         right_box.append(export_frame)
+        
+        viewer_frame = Gtk.Frame(label="3D Model Viewer")
+        viewer_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        viewer_box.set_margin_top(10)
+        viewer_box.set_margin_bottom(10)
+        viewer_box.set_margin_start(10)
+        viewer_box.set_margin_end(10)
+        
+        self._model_path_entry = Gtk.Entry()
+        self._model_path_entry.set_placeholder_text("FBX model path...")
+        self._model_path_entry.set_text("man_male.fbx")
+        viewer_box.append(self._model_path_entry)
+        
+        self._launch_viewer_btn = Gtk.Button(label="Launch 3D Viewer")
+        self._launch_viewer_btn.connect("clicked", self._on_launch_viewer_clicked)
+        self._launch_viewer_btn.add_css_class("suggested-action")
+        viewer_box.append(self._launch_viewer_btn)
+        
+        viewer_frame.set_child(viewer_box)
+        right_box.append(viewer_frame)
         
         self._3d_frame = Gtk.Frame(label="3D Preview")
         self._3d_picture = Gtk.Picture()
@@ -798,6 +820,41 @@ class MainWindow(Gtk.ApplicationWindow):
             
         except Exception as e:
             self.logger.error(f"Export failed: {e}")
+    
+    def _on_launch_viewer_clicked(self, button: Gtk.Button) -> None:
+        """Handle launch 3D viewer button click."""
+        model_path = self._model_path_entry.get_text()
+        
+        if not model_path:
+            self.logger.warning("No model path specified")
+            return
+        
+        from pathlib import Path
+        if not Path(model_path).is_absolute():
+            model_path = str(Path(__file__).parent.parent.parent / model_path)
+        
+        if self._opengl_viewer is None:
+            self._opengl_viewer = OpenGLViewer()
+        
+        if not self._opengl_viewer.is_available:
+            dialog = Gtk.AlertDialog()
+            dialog.set_message("Viewer Not Available")
+            dialog.set_detail("Build the C++ viewer first:\ncd viewer && mkdir build && cd build && cmake .. && make")
+            dialog.set_buttons(["OK"])
+            dialog.show(self)
+            return
+        
+        if self._opengl_viewer.is_running:
+            self._opengl_viewer.stop()
+        
+        if self._opengl_viewer.launch(model_path):
+            self.logger.info(f"Launched 3D viewer with model: {model_path}")
+        else:
+            dialog = Gtk.AlertDialog()
+            dialog.set_message("Launch Failed")
+            dialog.set_detail(f"Failed to launch viewer with model:\n{model_path}")
+            dialog.set_buttons(["OK"])
+            dialog.show(self)
     
     def _process_loop(self) -> None:
         """Main processing loop (runs in separate thread)."""

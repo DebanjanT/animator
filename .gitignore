@@ -88,6 +88,10 @@ output/*.json
 *.mov
 *.mkv
 *.webm
+*.fbx
+*.obj
+*.glb
+*.gltf
 
 # Large binary files
 *.bin
