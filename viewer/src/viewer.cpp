@@ -1,7 +1,8 @@
 #include "viewer.h"
 #include <cfloat>
+#include <cmath>
+#include <functional>
 #include <iostream>
-#include <thread>
 
 #include <glm/gtc/type_ptr.hpp>
 
@@ -17,6 +18,10 @@ MoCapViewer::MoCapViewer(int width, int height, const std::string &title)
       backgroundColor(0.2f, 0.2f, 0.25f), running(false), lastX(width / 2.0f),
       lastY(height / 2.0f), firstMouse(true), deltaTime(0.0f), lastFrame(0.0f),
       showGrid(true), showImGuiDemo(false), showGizmo(true),
+      showSkeleton(false), showSkeletonOnly(false),
+      skeletonLineWidth(2.0f), jointSphereSize(0.02f),
+      boneColor(0.0f, 0.8f, 1.0f), jointColor(1.0f, 0.4f, 0.0f),
+      skeletonVAO(0), skeletonVBO(0), jointVAO(0), jointVBO(0), jointEBO(0), jointIndexCount(0),
       gizmoOperation(ImGuizmo::TRANSLATE), gizmoMode(ImGuizmo::WORLD),
       modelMatrix(1.0f), useSnap(false), snapRotation(15.0f), snapScale(0.5f),
       groundPlaneVAO(0), groundPlaneVBO(0) {
@@ -447,8 +452,23 @@ void MoCapViewer::renderImGui() {
     }
     
     // Display Settings
-    if (ImGui::CollapsingHeader("Display")) {
+    if (ImGui::CollapsingHeader("Display", ImGuiTreeNodeFlags_DefaultOpen)) {
       ImGui::Checkbox("Show Grid", &showGrid);
+      ImGui::Separator();
+      
+      // Skeleton visualization (like Unreal Engine)
+      ImGui::Text("Skeleton View");
+      ImGui::Checkbox("Show Skeleton", &showSkeleton);
+      ImGui::Checkbox("Skeleton Only", &showSkeletonOnly);
+      
+      if (showSkeleton || showSkeletonOnly) {
+        // Note: Bone Width slider removed - glLineWidth > 1.0 not supported on macOS
+        ImGui::SliderFloat("Joint Size", &jointSphereSize, 0.005f, 0.1f);
+        ImGui::ColorEdit3("Bone Color", &boneColor.x);
+        ImGui::ColorEdit3("Joint Color", &jointColor.x);
+      }
+      
+      ImGui::Separator();
       ImGui::ColorEdit3("Background", &backgroundColor.x);
     }
   }
@@ -613,7 +633,15 @@ void MoCapViewer::render() {
       }
     }
 
-    model->draw(*shader);
+    // Draw mesh (unless skeleton-only mode)
+    if (!showSkeletonOnly) {
+      model->draw(*shader);
+    }
+    
+    // Draw skeleton overlay
+    if (showSkeleton || showSkeletonOnly) {
+      renderSkeleton();
+    }
   }
   
   // Render ImGuizmo gizmo
@@ -695,6 +723,191 @@ void MoCapViewer::drawGrid() {
   glBindVertexArray(gridVAO);
   glDrawArrays(GL_LINES, 0, gridVertexCount);
   glBindVertexArray(0);
+}
+
+void MoCapViewer::setupSkeletonBuffers() {
+  // Create VAO/VBO for skeleton lines (will be updated dynamically)
+  if (skeletonVAO == 0) {
+    glGenVertexArrays(1, &skeletonVAO);
+    glGenBuffers(1, &skeletonVBO);
+  }
+  
+  // Create sphere geometry for joints
+  if (jointVAO == 0) {
+    const int segments = 16;
+    const int rings = 12;
+    std::vector<float> vertices;
+    std::vector<unsigned int> indices;
+    
+    // Generate sphere vertices
+    for (int r = 0; r <= rings; r++) {
+      float phi = M_PI * r / rings;
+      for (int s = 0; s <= segments; s++) {
+        float theta = 2.0f * M_PI * s / segments;
+        float x = sin(phi) * cos(theta);
+        float y = cos(phi);
+        float z = sin(phi) * sin(theta);
+        vertices.push_back(x);
+        vertices.push_back(y);
+        vertices.push_back(z);
+      }
+    }
+    
+    // Generate indices for triangle strip
+    for (int r = 0; r < rings; r++) {
+      for (int s = 0; s < segments; s++) {
+        int curr = r * (segments + 1) + s;
+        int next = curr + segments + 1;
+        indices.push_back(curr);
+        indices.push_back(next);
+        indices.push_back(curr + 1);
+        indices.push_back(curr + 1);
+        indices.push_back(next);
+        indices.push_back(next + 1);
+      }
+    }
+    
+    jointIndexCount = indices.size();
+    
+    glGenVertexArrays(1, &jointVAO);
+    glGenBuffers(1, &jointVBO);
+    glGenBuffers(1, &jointEBO);
+    
+    glBindVertexArray(jointVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, jointVBO);
+    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(float), vertices.data(), GL_STATIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, jointEBO);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), indices.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glBindVertexArray(0);
+  }
+}
+
+void MoCapViewer::collectBonePositions(const BoneNode& node, const glm::mat4& parentTransform,
+                                       std::vector<glm::vec3>& boneLines,
+                                       std::vector<glm::vec3>& jointPositions) {
+  // Calculate this bone's world position
+  glm::mat4 nodeTransform = parentTransform * node.transform;
+  glm::vec3 nodePos = glm::vec3(nodeTransform[3]);
+  
+  // Add joint position
+  jointPositions.push_back(nodePos);
+  
+  // Draw lines to children
+  for (const auto& child : node.children) {
+    glm::mat4 childTransform = nodeTransform * child.transform;
+    glm::vec3 childPos = glm::vec3(childTransform[3]);
+    
+    // Add line from parent to child
+    boneLines.push_back(nodePos);
+    boneLines.push_back(childPos);
+    
+    // Recurse
+    collectBonePositions(child, nodeTransform, boneLines, jointPositions);
+  }
+}
+
+void MoCapViewer::renderSkeleton() {
+  if (!model || !model->getHasSkeleton()) return;
+  
+  // Clear any pending GL errors before skeleton rendering
+  while (glGetError() != GL_NO_ERROR) {}
+  
+  setupSkeletonBuffers();
+  
+  // Collect bone positions from hierarchy
+  std::vector<glm::vec3> boneLines;
+  std::vector<glm::vec3> jointPositions;
+  
+  const BoneNode& root = model->getRootBone();
+  glm::mat4 rootTransform = modelMatrix;
+  
+  // If we have animation, use the animated bone positions
+  auto& boneMatrices = animator->getFinalBoneMatrices();
+  auto& boneInfoMap = model->getBoneInfoMap();
+  
+  if (!boneMatrices.empty() && animator->hasExternalTransforms()) {
+    // Use animated positions - traverse bone hierarchy and apply transforms
+    std::function<void(const BoneNode&, const glm::mat4&)> collectAnimated;
+    collectAnimated = [&](const BoneNode& node, const glm::mat4& parentWorld) {
+      glm::mat4 nodeWorld = parentWorld;
+      
+      // Check if this is a bone with animation
+      auto it = boneInfoMap.find(node.name);
+      if (it != boneInfoMap.end() && it->second.id < (int)boneMatrices.size()) {
+        // Apply the animated bone matrix
+        glm::mat4 animatedLocal = boneMatrices[it->second.id] * glm::inverse(it->second.offset);
+        nodeWorld = modelMatrix * animatedLocal;
+      } else {
+        nodeWorld = parentWorld * node.transform;
+      }
+      
+      glm::vec3 nodePos = glm::vec3(nodeWorld[3]);
+      jointPositions.push_back(nodePos);
+      
+      for (const auto& child : node.children) {
+        glm::mat4 childWorld = nodeWorld;
+        auto childIt = boneInfoMap.find(child.name);
+        if (childIt != boneInfoMap.end() && childIt->second.id < (int)boneMatrices.size()) {
+          glm::mat4 childAnimated = boneMatrices[childIt->second.id] * glm::inverse(childIt->second.offset);
+          childWorld = modelMatrix * childAnimated;
+        } else {
+          childWorld = nodeWorld * child.transform;
+        }
+        
+        glm::vec3 childPos = glm::vec3(childWorld[3]);
+        boneLines.push_back(nodePos);
+        boneLines.push_back(childPos);
+        
+        collectAnimated(child, nodeWorld);
+      }
+    };
+    
+    collectAnimated(root, rootTransform);
+  } else {
+    // Use bind pose
+    collectBonePositions(root, rootTransform, boneLines, jointPositions);
+  }
+  
+  // Scale joint size based on model
+  float jointSize = jointSphereSize * camera->ModelRadius;
+  
+  // Render bone lines
+  if (!boneLines.empty()) {
+    glBindVertexArray(skeletonVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, skeletonVBO);
+    glBufferData(GL_ARRAY_BUFFER, boneLines.size() * sizeof(glm::vec3), boneLines.data(), GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
+    
+    shader->setMat4("model", glm::mat4(1.0f));
+    shader->setBool("useSkinning", false);
+    shader->setVec3("objectColor", boneColor);
+    
+    // Note: glLineWidth > 1.0 not supported on macOS Core Profile
+    // Line width setting removed to avoid GL_INVALID_VALUE errors
+    glDrawArrays(GL_LINES, 0, boneLines.size());
+    glBindVertexArray(0);
+  }
+  
+  // Render joint spheres
+  if (!jointPositions.empty()) {
+    shader->setVec3("objectColor", jointColor);
+    
+    for (const auto& pos : jointPositions) {
+      glm::mat4 jointModel = glm::translate(glm::mat4(1.0f), pos);
+      jointModel = glm::scale(jointModel, glm::vec3(jointSize));
+      shader->setMat4("model", jointModel);
+      
+      glBindVertexArray(jointVAO);
+      glDrawElements(GL_TRIANGLES, jointIndexCount, GL_UNSIGNED_INT, 0);
+      glBindVertexArray(0);
+    }
+  }
+  
+  // Clear any GL errors from skeleton rendering to prevent spam in mesh draw
+  while (glGetError() != GL_NO_ERROR) {}
 }
 
 void MoCapViewer::setBoneTransform(const std::string &boneName, float px,

@@ -77,6 +77,22 @@ private:
   bool showGrid;
   bool showImGuiDemo;
   bool showGizmo;
+  bool showSkeleton;      // Toggle skeleton overlay
+  bool showSkeletonOnly;  // Hide mesh, show only skeleton
+  float skeletonLineWidth;
+  float jointSphereSize;
+  glm::vec3 boneColor;
+  glm::vec3 jointColor;
+  
+  // Skeleton rendering
+  unsigned int skeletonVAO, skeletonVBO;
+  unsigned int jointVAO, jointVBO, jointEBO;
+  int jointIndexCount;
+  void setupSkeletonBuffers();
+  void renderSkeleton();
+  void collectBonePositions(const BoneNode& node, const glm::mat4& parentTransform,
+                           std::vector<glm::vec3>& boneLines, 
+                           std::vector<glm::vec3>& jointPositions);
   
   // Gizmo state
   int gizmoOperation;  // ImGuizmo::OPERATION
