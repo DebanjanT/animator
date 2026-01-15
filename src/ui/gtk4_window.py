@@ -18,7 +18,7 @@ import numpy as np
 from src.core import Config, get_logger, FrameTimer
 from src.video.capture import VideoCapture, CaptureState
 from src.pose.unified_processor import UnifiedPoseProcessor
-from src.pose.reconstructor_3d import Pose3D
+from src.pose.reconstructor_3d import Pose3D, PoseReconstructor3D
 from src.pose.hand_tracker import HandTracker, HandsData
 from src.pose.halpe_estimator import HalpeEstimator
 from src.pose.alphapose_estimator import convert_halpe_to_mixamo
@@ -89,6 +89,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._pose_processor: Optional[UnifiedPoseProcessor] = None
         self._hand_tracker: Optional[HandTracker] = None
         self._halpe_estimator: Optional[HalpeEstimator] = None
+        self._pose_reconstructor: Optional[PoseReconstructor3D] = None
         self._floor_detector: Optional[FloorDetector] = None
         self._root_motion: Optional[RootMotionExtractor] = None
         self._skeleton_solver: Optional[SkeletonSolver] = None
@@ -438,6 +439,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 enable_hands=self._enable_hands
             )
             
+            self._pose_reconstructor = PoseReconstructor3D(self.config)
             self._floor_detector = FloorDetector(self.config)
             self._root_motion = RootMotionExtractor(self.config)
             self._skeleton_solver = SkeletonSolver(self.config)
@@ -871,8 +873,14 @@ class MainWindow(Gtk.ApplicationWindow):
             
             # Use Halpe 136-keypoint estimation (body + face + hands)
             halpe_pose = None
+            pose_3d = None
             if self._halpe_estimator:
                 halpe_pose = self._halpe_estimator.process(frame, timestamp)
+            
+            # Reconstruct 3D pose from Halpe keypoints
+            if halpe_pose and self._pose_reconstructor:
+                h, w = frame.shape[:2]
+                pose_3d = self._pose_reconstructor.reconstruct(halpe_pose, w, h)
             
             # Draw Halpe pose on frame
             if halpe_pose:
@@ -889,13 +897,16 @@ class MainWindow(Gtk.ApplicationWindow):
             self._frame_timer.stop()
             frame_count += 1
             
-            # Update display with Halpe pose info
-            GLib.idle_add(self._update_display, display_frame, None, halpe_pose)
+            # Update display with Halpe pose info and 3D pose
+            GLib.idle_add(self._update_display, display_frame, pose_3d, halpe_pose)
         
         self.logger.info("Processing loop ended")
     
-    def _update_display(self, frame: np.ndarray, pose_2d, halpe_pose=None) -> bool:
+    def _update_display(self, frame: np.ndarray, pose_3d, halpe_pose=None) -> bool:
         """Update display (called from main thread)."""
+        # Store 3D pose for rendering
+        self._current_pose_3d = pose_3d
+        
         h, w = frame.shape[:2]
         display_w, display_h = 960, 540
         scale = min(display_w / w, display_h / h)
@@ -923,8 +934,8 @@ class MainWindow(Gtk.ApplicationWindow):
             hand_count = sum(1 for i in range(94, 136) if i in halpe_pose.keypoints and halpe_pose.keypoints[i].is_visible)
             total = body_count + face_count + hand_count
             self._pose_label.set_label(f"Halpe: {total}/136 (body:{body_count} face:{face_count} hands:{hand_count})")
-        elif pose_2d:
-            self._pose_label.set_label(f"Pose: {pose_2d.num_visible_joints}/33 joints")
+        elif pose_3d:
+            self._pose_label.set_label(f"Pose 3D: {pose_3d.num_visible_joints} joints")
         else:
             self._pose_label.set_label("Pose: Not detected")
         

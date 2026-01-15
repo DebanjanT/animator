@@ -435,10 +435,10 @@ class PoseReconstructor3D:
             
             # Convert to 3D world space (meters)
             # X: -0.5 to 0.5 range, scaled
-            # Y: flip and scale (up is positive)
+            # Y: keep image space (viewer will flip)
             # Z: depth from keypoint
             x_3d = (x_norm - 0.5) * 2.0  # -1 to 1 range
-            y_3d = -(y_norm - 0.5) * 2.0  # Flip Y
+            y_3d = (y_norm - 0.5) * 2.0  # No flip - viewer handles it
             z_3d = kpt.z if hasattr(kpt, 'z') and kpt.z != 0 else 0.0
             
             # Apply temporal smoothing if enabled
