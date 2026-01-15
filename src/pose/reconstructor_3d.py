@@ -374,6 +374,107 @@ class PoseReconstructor3D:
         
         return 1.7
     
+    def reconstruct(self, halpe_pose, image_width: int, image_height: int) -> Optional[Pose3D]:
+        """
+        Reconstruct 3D pose from HalpePose 2D keypoints.
+        
+        Uses the Z values from the keypoints (if available) and converts
+        normalized coordinates to 3D world space.
+        
+        Args:
+            halpe_pose: HalpePose object with keypoints
+            image_width: Image width for denormalization
+            image_height: Image height for denormalization
+            
+        Returns:
+            Pose3D or None
+        """
+        from src.pose.halpe_keypoints import HalpeBodyIndex
+        
+        # Map Halpe body indices to joint names
+        HALPE_TO_JOINT = {
+            int(HalpeBodyIndex.NOSE): "nose",
+            int(HalpeBodyIndex.LEFT_EYE): "left_eye",
+            int(HalpeBodyIndex.RIGHT_EYE): "right_eye",
+            int(HalpeBodyIndex.LEFT_EAR): "left_ear",
+            int(HalpeBodyIndex.RIGHT_EAR): "right_ear",
+            int(HalpeBodyIndex.LEFT_SHOULDER): "left_shoulder",
+            int(HalpeBodyIndex.RIGHT_SHOULDER): "right_shoulder",
+            int(HalpeBodyIndex.LEFT_ELBOW): "left_elbow",
+            int(HalpeBodyIndex.RIGHT_ELBOW): "right_elbow",
+            int(HalpeBodyIndex.LEFT_WRIST): "left_wrist",
+            int(HalpeBodyIndex.RIGHT_WRIST): "right_wrist",
+            int(HalpeBodyIndex.LEFT_HIP): "left_hip",
+            int(HalpeBodyIndex.RIGHT_HIP): "right_hip",
+            int(HalpeBodyIndex.LEFT_KNEE): "left_knee",
+            int(HalpeBodyIndex.RIGHT_KNEE): "right_knee",
+            int(HalpeBodyIndex.LEFT_ANKLE): "left_ankle",
+            int(HalpeBodyIndex.RIGHT_ANKLE): "right_ankle",
+            int(HalpeBodyIndex.LEFT_BIG_TOE): "left_foot_index",
+            int(HalpeBodyIndex.RIGHT_BIG_TOE): "right_foot_index",
+            int(HalpeBodyIndex.LEFT_HEEL): "left_heel",
+            int(HalpeBodyIndex.RIGHT_HEEL): "right_heel",
+        }
+        
+        joints = {}
+        timestamp = halpe_pose.timestamp
+        
+        for halpe_idx, joint_name in HALPE_TO_JOINT.items():
+            kpt = halpe_pose.get_keypoint(halpe_idx)
+            if kpt is None or not kpt.is_visible:
+                continue
+            
+            # Convert to normalized coordinates if needed
+            if kpt.x > 1.0 or kpt.y > 1.0:
+                # Pixel coordinates - normalize
+                x_norm = kpt.x / image_width
+                y_norm = kpt.y / image_height
+            else:
+                x_norm = kpt.x
+                y_norm = kpt.y
+            
+            # Convert to 3D world space (meters)
+            # X: -0.5 to 0.5 range, scaled
+            # Y: flip and scale (up is positive)
+            # Z: depth from keypoint
+            x_3d = (x_norm - 0.5) * 2.0  # -1 to 1 range
+            y_3d = -(y_norm - 0.5) * 2.0  # Flip Y
+            z_3d = kpt.z if hasattr(kpt, 'z') and kpt.z != 0 else 0.0
+            
+            # Apply temporal smoothing if enabled
+            if self._temporal_smoothing and joint_name in self._joint_filters:
+                pos = np.array([x_3d, y_3d, z_3d], dtype=np.float32)
+                pos = self._joint_filters[joint_name].filter(pos, timestamp)
+                x_3d, y_3d, z_3d = pos
+            
+            joints[joint_name] = Joint3D(
+                name=joint_name,
+                index=halpe_idx,
+                x=float(x_3d),
+                y=float(y_3d),
+                z=float(z_3d),
+                confidence=kpt.confidence
+            )
+        
+        if not joints:
+            return None
+        
+        pose_3d = Pose3D(
+            frame_number=halpe_pose.frame_number,
+            timestamp=timestamp,
+            joints=joints
+        )
+        
+        # Update history
+        self._pose_history.append(pose_3d)
+        if len(self._pose_history) > self._max_history:
+            self._pose_history.pop(0)
+        
+        self._frame_count += 1
+        self._last_pose_3d = pose_3d
+        
+        return pose_3d
+    
     def clear_history(self) -> None:
         """Clear pose history and reset filters."""
         self._pose_history.clear()

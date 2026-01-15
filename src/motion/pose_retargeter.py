@@ -262,6 +262,29 @@ class RetargetedPose:
 # POSE RETARGETER
 # =============================================================================
 
+# Weight-based bone influence for missing bone interpolation
+BONE_WEIGHTS: Dict[MixamoBone, Dict[MixamoBone, float]] = {
+    # If shoulder is missing, use spine and arm
+    MixamoBone.LEFT_SHOULDER: {MixamoBone.SPINE2: 0.5, MixamoBone.LEFT_ARM: 0.5},
+    MixamoBone.RIGHT_SHOULDER: {MixamoBone.SPINE2: 0.5, MixamoBone.RIGHT_ARM: 0.5},
+    # If spine1 is missing, interpolate between spine and spine2
+    MixamoBone.SPINE1: {MixamoBone.SPINE: 0.5, MixamoBone.SPINE2: 0.5},
+    # If hand is missing, use forearm
+    MixamoBone.LEFT_HAND: {MixamoBone.LEFT_FOREARM: 1.0},
+    MixamoBone.RIGHT_HAND: {MixamoBone.RIGHT_FOREARM: 1.0},
+    # If foot is missing, use leg
+    MixamoBone.LEFT_FOOT: {MixamoBone.LEFT_LEG: 0.7, MixamoBone.LEFT_UP_LEG: 0.3},
+    MixamoBone.RIGHT_FOOT: {MixamoBone.RIGHT_LEG: 0.7, MixamoBone.RIGHT_UP_LEG: 0.3},
+    # If toe is missing, use foot
+    MixamoBone.LEFT_TOE_BASE: {MixamoBone.LEFT_FOOT: 1.0},
+    MixamoBone.RIGHT_TOE_BASE: {MixamoBone.RIGHT_FOOT: 1.0},
+    # If neck is missing, use head and spine
+    MixamoBone.NECK: {MixamoBone.HEAD: 0.4, MixamoBone.SPINE2: 0.6},
+    # If head is missing, use neck
+    MixamoBone.HEAD: {MixamoBone.NECK: 1.0},
+}
+
+
 class PoseRetargeter:
     """
     Converts 2D pose estimation to Mixamo skeleton rotations.
@@ -271,6 +294,7 @@ class PoseRetargeter:
     - Local rotation computation
     - Bone chain propagation
     - Optional IK corrections
+    - Weight-based interpolation for missing bones
     """
     
     def __init__(
@@ -278,11 +302,13 @@ class PoseRetargeter:
         enable_ik: bool = True,
         enable_foot_locking: bool = True,
         enable_pole_vectors: bool = True,
+        enable_weight_ik: bool = True,
         smoothing_factor: float = 0.3,
     ):
         self.enable_ik = enable_ik
         self.enable_foot_locking = enable_foot_locking
         self.enable_pole_vectors = enable_pole_vectors
+        self.enable_weight_ik = enable_weight_ik
         self.smoothing_factor = smoothing_factor
         
         # State for temporal smoothing
@@ -298,6 +324,9 @@ class PoseRetargeter:
         
         # Debug info
         self.debug_info: Dict[str, any] = {}
+        
+        # Track which bones were interpolated
+        self._interpolated_bones: List[str] = []
     
     def retarget_pose2d(
         self,
@@ -686,6 +715,10 @@ class PoseRetargeter:
         if self.enable_ik:
             self._apply_ik_corrections(result, joints)
         
+        # Apply weight-based IK for missing bones
+        if self.enable_weight_ik:
+            self._interpolate_missing_bones(result, world_rotations)
+        
         return result
     
     def _smooth_rotation(self, bone_name: str, rotation: np.ndarray) -> np.ndarray:
@@ -789,6 +822,84 @@ class PoseRetargeter:
         self._ground_samples.clear()
         self._left_foot_locked_pos = None
         self._right_foot_locked_pos = None
+        self._interpolated_bones.clear()
+    
+    def _interpolate_missing_bones(
+        self,
+        pose: RetargetedPose,
+        world_rotations: Dict[MixamoBone, np.ndarray],
+    ):
+        """
+        Interpolate missing bones using weight-based influence from detected bones.
+        
+        This allows the skeleton to move smoothly even when some keypoints
+        are not detected, by inferring their rotation from nearby bones.
+        """
+        self._interpolated_bones.clear()
+        
+        # Check each bone that has weight definitions
+        for target_bone, influences in BONE_WEIGHTS.items():
+            bone_name = target_bone.value
+            
+            # Skip if bone already exists
+            if bone_name in pose.bones:
+                continue
+            
+            # Try to interpolate from influence bones
+            weighted_rotations = []
+            total_weight = 0.0
+            
+            for source_bone, weight in influences.items():
+                source_name = source_bone.value
+                if source_name in pose.bones:
+                    weighted_rotations.append((pose.bones[source_name].local_rotation, weight))
+                    total_weight += weight
+            
+            # If we have enough influence, interpolate
+            if total_weight > 0.3:  # At least 30% of weights available
+                # Normalize weights
+                normalized_rotations = [
+                    (rot, w / total_weight) for rot, w in weighted_rotations
+                ]
+                
+                # Weighted quaternion average using iterative slerp
+                result_rot = normalized_rotations[0][0]
+                accumulated_weight = normalized_rotations[0][1]
+                
+                for rot, weight in normalized_rotations[1:]:
+                    # Interpolate between accumulated result and new rotation
+                    t = weight / (accumulated_weight + weight)
+                    result_rot = quat_slerp(result_rot, rot, t)
+                    accumulated_weight += weight
+                
+                # Apply smoothing
+                result_rot = self._smooth_rotation(bone_name, result_rot)
+                
+                # Get world rotation from parent if available
+                parent = MIXAMO_BONE_PARENT.get(target_bone)
+                if parent and parent in world_rotations:
+                    world_rot = quat_multiply(world_rotations[parent], result_rot)
+                else:
+                    world_rot = result_rot
+                
+                # Add interpolated bone
+                pose.bones[bone_name] = RetargetedBone(
+                    name=bone_name,
+                    local_rotation=result_rot,
+                    world_rotation=world_rot,
+                    source_direction=np.array([0, 1, 0]),  # Unknown
+                    bind_direction=MIXAMO_BIND_POSE.get(target_bone, np.array([0, 1, 0])),
+                    confidence=total_weight,  # Use weight as confidence
+                )
+                
+                self._interpolated_bones.append(bone_name)
+        
+        # Store debug info
+        self.debug_info['interpolated_bones'] = self._interpolated_bones.copy()
+    
+    def get_interpolated_bones(self) -> List[str]:
+        """Get list of bones that were interpolated in the last frame."""
+        return self._interpolated_bones.copy()
 
 
 # =============================================================================

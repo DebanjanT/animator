@@ -23,6 +23,7 @@ import argparse
 import sys
 import time
 from pathlib import Path
+import numpy as np
 
 # Add project root to path
 project_root = Path(__file__).parent
@@ -661,19 +662,82 @@ def run_with_camera(model_path: str, camera_index: int):
         viewer.stop()
 
 
+def draw_floor_grid(frame: np.ndarray, floor_plane, pose_3d, frame_width: int, frame_height: int) -> np.ndarray:
+    """Draw floor detection grid on frame to visualize detected floor plane."""
+    import cv2
+    
+    if floor_plane is None:
+        return frame
+    
+    result = frame.copy()
+    h, w = result.shape[:2]
+    
+    # Get floor normal and display info
+    normal = floor_plane.normal
+    confidence = floor_plane.confidence
+    
+    # Draw floor info text
+    cv2.putText(result, f"Floor Normal: ({normal[0]:.2f}, {normal[1]:.2f}, {normal[2]:.2f})", 
+                (10, h - 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+    cv2.putText(result, f"Floor Confidence: {confidence:.1%}", 
+                (10, h - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+    cv2.putText(result, f"Floor Y: {floor_plane.d:.3f}m", 
+                (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+    
+    # Draw a simple floor indicator line at the bottom based on foot positions
+    if pose_3d:
+        foot_joints = ["left_ankle", "right_ankle", "left_heel", "right_heel"]
+        foot_y_positions = []
+        
+        for joint_name in foot_joints:
+            joint = pose_3d.joints.get(joint_name)
+            if joint and joint.is_visible:
+                # Project to 2D - use y coordinate scaled to image
+                screen_y = int((0.5 + joint.position[1] * 2) * h)
+                foot_y_positions.append(screen_y)
+        
+        if foot_y_positions:
+            avg_foot_y = int(np.mean(foot_y_positions))
+            # Draw floor line
+            cv2.line(result, (0, avg_foot_y), (w, avg_foot_y), (0, 255, 255), 2)
+            
+            # Draw grid lines for perspective effect
+            grid_spacing = 50
+            for i in range(-5, 6):
+                x_offset = i * grid_spacing
+                # Vertical grid lines (converging to vanity point)
+                center_x = w // 2
+                cv2.line(result, (center_x + x_offset, avg_foot_y), 
+                        (center_x + x_offset * 2, h), (0, 200, 200), 1)
+            
+            # Horizontal grid lines
+            for i in range(1, 4):
+                y_pos = avg_foot_y + i * 20
+                if y_pos < h:
+                    alpha = 1.0 - (i * 0.2)
+                    color = (0, int(200 * alpha), int(200 * alpha))
+                    cv2.line(result, (0, y_pos), (w, y_pos), color, 1)
+    
+    return result
+
+
 def run_with_halpe(model_path: str, video_path: str, poses_json: str = None):
-    """Process video using Halpe 136-keypoint estimation."""
+    """Process video using Halpe 136-keypoint estimation with floor detection."""
     import cv2
     import numpy as np
     import mocap_viewer_py
     
-    # Import Halpe estimator
+    # Import Halpe estimator and floor detector
     try:
         from src.pose.halpe_estimator import HalpeEstimator
-        from src.pose.alphapose_estimator import convert_halpe_to_mixamo
+        from src.motion.floor_detector import FloorDetector
+        from src.pose.reconstructor_3d import PoseReconstructor3D
+        from src.motion.pose_retargeter import PoseRetargeter
         HALPE_AVAILABLE = True
     except ImportError as e:
         print(f"Warning: Halpe estimator not available: {e}")
+        import traceback
+        traceback.print_exc()
         HALPE_AVAILABLE = False
         return
     
@@ -700,12 +764,33 @@ def run_with_halpe(model_path: str, video_path: str, poses_json: str = None):
     print(f"Processing video at {fps:.1f} FPS ({frame_width}x{frame_height})...")
     print("Close viewer window or press ESC to quit.")
     
-    # Initialize Halpe estimator
+    # Initialize Halpe estimator with face and hands
     print("Initializing Halpe 136-keypoint estimator...")
-    estimator = HalpeEstimator(json_path=poses_json, use_mediapipe_fallback=True)
+    estimator = HalpeEstimator(
+        json_path=poses_json, 
+        use_mediapipe_fallback=True,
+        enable_face=True,
+        enable_hands=True,
+        enable_smoothing=True
+    )
+    
+    # Initialize 3D reconstructor and floor detector
+    print("Initializing 3D reconstructor and floor detector...")
+    reconstructor = PoseReconstructor3D()
+    floor_detector = FloorDetector()
+    
+    # Initialize retargeter with weight-based IK
+    retargeter = PoseRetargeter(
+        enable_ik=True,
+        enable_foot_locking=True,
+        enable_pole_vectors=True,
+        enable_weight_ik=True,  # Enable weight-based IK for missing bones
+        smoothing_factor=0.3
+    )
     
     frame_count = 0
     first_bone_log = True
+    show_floor_grid = True  # Toggle with 'F' key
     
     try:
         while True:
@@ -716,6 +801,9 @@ def run_with_halpe(model_path: str, video_path: str, poses_json: str = None):
             if not ret:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 frame_count = 0
+                estimator.reset_smoothing()
+                floor_detector.reset()
+                retargeter.reset()
                 continue
             
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -723,31 +811,72 @@ def run_with_halpe(model_path: str, video_path: str, poses_json: str = None):
             
             # Get Halpe pose
             pose = estimator.process(frame_rgb, timestamp)
+            pose_3d = None
+            floor_plane = None
             
             if pose and pose.is_valid:
-                # Convert to Mixamo bone transforms
-                bone_data = convert_halpe_to_mixamo(pose, frame_width, frame_height)
+                # Reconstruct 3D pose
+                pose_3d = reconstructor.reconstruct(pose, frame_width, frame_height)
                 
-                if bone_data:
-                    if first_bone_log:
-                        print(f"Sending {len(bone_data)} bones to viewer:")
-                        for name in sorted(bone_data.keys())[:15]:
-                            print(f"  {name}")
-                        if len(bone_data) > 15:
-                            print(f"  ... and {len(bone_data) - 15} more")
-                        first_bone_log = False
+                # Update floor detection
+                if pose_3d:
+                    floor_plane = floor_detector.update(pose_3d)
+                
+                # Use new retargeter with Halpe keypoints
+                keypoints_dict = {}
+                for idx, kpt in pose.keypoints.items():
+                    # Handle both normalized (0-1) and pixel coordinates
+                    if kpt.x <= 1.0 and kpt.y <= 1.0:
+                        x = kpt.x * frame_width
+                        y = kpt.y * frame_height
+                    else:
+                        x = kpt.x
+                        y = kpt.y
+                    keypoints_dict[idx] = (x, y, kpt.z, kpt.confidence)
+                
+                retargeted = retargeter.retarget_halpe(
+                    keypoints_dict, frame_width, frame_height, timestamp
+                )
+                
+                if retargeted:
+                    bone_data = retargeted.to_animation_frame()
                     
-                    viewer.set_animation_frame(bone_data)
+                    if bone_data:
+                        if first_bone_log:
+                            print(f"Sending {len(bone_data)} bones to viewer:")
+                            for name in sorted(bone_data.keys())[:15]:
+                                print(f"  {name}")
+                            if len(bone_data) > 15:
+                                print(f"  ... and {len(bone_data) - 15} more")
+                            first_bone_log = False
+                        
+                        viewer.set_animation_frame(bone_data)
                 
                 # Draw pose on frame
-                display_frame = estimator.draw_pose(frame, pose, draw_hands=True, draw_labels=True)
+                display_frame = estimator.draw_pose(frame, pose, draw_hands=True, draw_labels=False)
             else:
                 display_frame = frame
             
+            # Draw floor grid visualization
+            if show_floor_grid:
+                display_frame = draw_floor_grid(
+                    display_frame, floor_plane, pose_3d, frame_width, frame_height
+                )
+            
+            # Draw keypoint count and status
+            if pose:
+                visible_count = sum(1 for kpt in pose.keypoints.values() if kpt.is_visible)
+                cv2.putText(display_frame, f"Keypoints: {visible_count}/136", 
+                           (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            
             # Show video with pose overlay
-            cv2.imshow('Halpe Pose - Press Q to quit', display_frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            cv2.imshow('Halpe Pose - Press Q to quit, F for floor grid', display_frame)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
                 break
+            elif key == ord('f'):
+                show_floor_grid = not show_floor_grid
+                print(f"Floor grid: {'ON' if show_floor_grid else 'OFF'}")
             
             frame_count += 1
             time.sleep(max(0, frame_time - 0.02))
