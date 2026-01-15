@@ -823,11 +823,15 @@ void MoCapViewer::renderSkeleton() {
   const BoneNode& root = model->getRootBone();
   glm::mat4 rootTransform = modelMatrix;
   
-  // If we have animation, use the animated bone positions
+  // If we have animation (FBX animation or external pose data), use animated bone positions
   auto& boneMatrices = animator->getFinalBoneMatrices();
   auto& boneInfoMap = model->getBoneInfoMap();
   
-  if (!boneMatrices.empty() && animator->hasExternalTransforms()) {
+  // Check if we have valid bone matrices from animation or external transforms
+  bool hasAnimatedBones = !boneMatrices.empty() && 
+                          (animator->hasExternalTransforms() || animator->getCurrentAnimation() != nullptr);
+  
+  if (hasAnimatedBones) {
     // Use animated positions - traverse bone hierarchy and apply transforms
     std::function<void(const BoneNode&, const glm::mat4&)> collectAnimated;
     collectAnimated = [&](const BoneNode& node, const glm::mat4& parentWorld) {
