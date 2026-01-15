@@ -79,6 +79,7 @@ private:
   bool showGizmo;
   bool showSkeleton;      // Toggle skeleton overlay
   bool showSkeletonOnly;  // Hide mesh, show only skeleton
+  bool showRetargetDebug; // Show bone retargeting debug window
   float skeletonLineWidth;
   float jointSphereSize;
   glm::vec3 boneColor;

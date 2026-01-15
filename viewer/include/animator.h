@@ -65,6 +65,7 @@ public:
   void calculateBoneTransforms();
   std::vector<glm::mat4> &getFinalBoneMatrices() { return finalBoneMatrices; }
   bool hasExternalTransforms() const { return !boneTransforms.empty(); }
+  const std::map<std::string, BoneTransform> &getBoneTransforms() const { return boneTransforms; }
 
   void reset();
 

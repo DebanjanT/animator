@@ -392,195 +392,25 @@ def convert_hands_to_mixamo(hands_data):
 
 
 def convert_pose2d_to_mixamo(pose):
-    """Convert Pose2D to Mixamo bone transforms.
+    """Convert Pose2D to Mixamo bone transforms using proper retargeting.
     
-    Uses 2D pose landmarks to compute bone ROTATIONS relative to bind pose.
-    For skeletal animation, we only need rotations - positions are handled by hierarchy.
+    Uses the PoseRetargeter which handles:
+    - Proper local rotation computation (relative to parent bones)
+    - Coordinate system conversion
+    - Temporal smoothing
+    - IK corrections (foot locking, pole vectors)
+    
     Returns dict of bone_name -> [px, py, pz, qw, qx, qy, qz, sx, sy, sz]
     """
-    import numpy as np
-    
-    def get_pos(joint_name):
-        joint = pose.joints.get(joint_name)
-        if joint and joint.is_visible:
-            # Convert to 3D using MediaPipe coordinates
-            # x: 0-1 normalized (left to right)
-            # y: 0-1 normalized (top to bottom)
-            # z: depth relative to hips (negative = closer to camera)
-            return np.array([
-                (joint.x - 0.5),      # Center x (-0.5 to 0.5)
-                -(joint.y - 0.5),     # Flip y (up is positive)
-                -joint.z * 0.5        # Scale and flip z (MediaPipe z is depth)
-            ])
-        return None
-    
-    def normalize(v):
-        n = np.linalg.norm(v)
-        return v / n if n > 1e-6 else np.array([0, 1, 0])
-    
-    def quat_from_axis_angle(axis, angle):
-        """Create quaternion from axis-angle representation."""
-        axis = normalize(axis)
-        s = np.sin(angle / 2)
-        return np.array([np.cos(angle / 2), axis[0] * s, axis[1] * s, axis[2] * s])
-    
-    def quat_from_vectors(v_from, v_to):
-        """Quaternion rotating v_from to v_to."""
-        v_from = normalize(v_from)
-        v_to = normalize(v_to)
-        cross = np.cross(v_from, v_to)
-        dot = np.dot(v_from, v_to)
-        
-        if dot < -0.9999:
-            # 180 degree rotation
-            return np.array([0, 0, 1, 0])
-        if dot > 0.9999:
-            # No rotation needed
-            return np.array([1, 0, 0, 0])
-        
-        w = 1 + dot
-        q = np.array([w, cross[0], cross[1], cross[2]])
-        return q / np.linalg.norm(q)
-    
-    def make_bone_transform(quat):
-        """Create bone transform with rotation only (position=0, scale=1)."""
-        return [0.0, 0.0, 0.0, quat[0], quat[1], quat[2], quat[3], 1.0, 1.0, 1.0]
-    
-    bone_data = {}
+    from src.motion.pose_retargeter import retarget_pose2d_to_mixamo
     
     try:
-        # Get key positions
-        left_hip = get_pos("left_hip")
-        right_hip = get_pos("right_hip")
-        left_shoulder = get_pos("left_shoulder")
-        right_shoulder = get_pos("right_shoulder")
-        left_elbow = get_pos("left_elbow")
-        right_elbow = get_pos("right_elbow")
-        left_wrist = get_pos("left_wrist")
-        right_wrist = get_pos("right_wrist")
-        left_knee = get_pos("left_knee")
-        right_knee = get_pos("right_knee")
-        left_ankle = get_pos("left_ankle")
-        right_ankle = get_pos("right_ankle")
-        
-        if left_hip is None or right_hip is None:
-            return None
-        
-        # Calculate body orientation from hips and shoulders
-        hip_center = (left_hip + right_hip) / 2
-        hip_vector = normalize(left_hip - right_hip)  # Points to the left
-        
-        if left_shoulder is not None and right_shoulder is not None:
-            shoulder_center = (left_shoulder + right_shoulder) / 2
-            spine_dir = normalize(shoulder_center - hip_center)
-        else:
-            spine_dir = np.array([0, 1, 0])
-        
-        # Hips rotation - rotate to match spine tilt
-        # Bind pose: spine points up (0, 1, 0)
-        hips_quat = quat_from_vectors(np.array([0, 1, 0]), spine_dir)
-        bone_data["mixamorig:Hips"] = make_bone_transform(hips_quat)
-        
-        # Spine - identity since hips already rotated
-        bone_data["mixamorig:Spine"] = make_bone_transform(np.array([1, 0, 0, 0]))
-        
-        # Left Arm - bind pose points LEFT (+X in Mixamo)
-        if left_shoulder is not None and left_elbow is not None:
-            left_arm_dir = normalize(left_elbow - left_shoulder)
-            # Bind pose: arm points left (+X)
-            left_arm_quat = quat_from_vectors(np.array([1, 0, 0]), left_arm_dir)
-            bone_data["mixamorig:LeftArm"] = make_bone_transform(left_arm_quat)
-        
-        # Left ForeArm
-        if left_elbow is not None and left_wrist is not None:
-            left_forearm_dir = normalize(left_wrist - left_elbow)
-            left_forearm_quat = quat_from_vectors(np.array([1, 0, 0]), left_forearm_dir)
-            bone_data["mixamorig:LeftForeArm"] = make_bone_transform(left_forearm_quat)
-        
-        # Right Arm - bind pose points RIGHT (-X in Mixamo)
-        if right_shoulder is not None and right_elbow is not None:
-            right_arm_dir = normalize(right_elbow - right_shoulder)
-            # Bind pose: arm points right (-X)
-            right_arm_quat = quat_from_vectors(np.array([-1, 0, 0]), right_arm_dir)
-            bone_data["mixamorig:RightArm"] = make_bone_transform(right_arm_quat)
-        
-        # Right ForeArm
-        if right_elbow is not None and right_wrist is not None:
-            right_forearm_dir = normalize(right_wrist - right_elbow)
-            right_forearm_quat = quat_from_vectors(np.array([-1, 0, 0]), right_forearm_dir)
-            bone_data["mixamorig:RightForeArm"] = make_bone_transform(right_forearm_quat)
-        
-        # Left Leg - bind pose points DOWN (-Y)
-        if left_hip is not None and left_knee is not None:
-            left_leg_dir = normalize(left_knee - left_hip)
-            left_leg_quat = quat_from_vectors(np.array([0, -1, 0]), left_leg_dir)
-            bone_data["mixamorig:LeftUpLeg"] = make_bone_transform(left_leg_quat)
-        
-        # Left Lower Leg
-        if left_knee is not None and left_ankle is not None:
-            left_shin_dir = normalize(left_ankle - left_knee)
-            left_shin_quat = quat_from_vectors(np.array([0, -1, 0]), left_shin_dir)
-            bone_data["mixamorig:LeftLeg"] = make_bone_transform(left_shin_quat)
-        
-        # Right Leg - bind pose points DOWN (-Y)
-        if right_hip is not None and right_knee is not None:
-            right_leg_dir = normalize(right_knee - right_hip)
-            right_leg_quat = quat_from_vectors(np.array([0, -1, 0]), right_leg_dir)
-            bone_data["mixamorig:RightUpLeg"] = make_bone_transform(right_leg_quat)
-        
-        # Right Lower Leg
-        if right_knee is not None and right_ankle is not None:
-            right_shin_dir = normalize(right_ankle - right_knee)
-            right_shin_quat = quat_from_vectors(np.array([0, -1, 0]), right_shin_dir)
-            bone_data["mixamorig:RightLeg"] = make_bone_transform(right_shin_quat)
-        
-        # Additional bones for better accuracy
-        
-        # Left Shoulder
-        if left_shoulder is not None and right_shoulder is not None:
-            # Shoulder rotates arm outward
-            shoulder_to_arm = normalize(left_shoulder - (left_shoulder + right_shoulder) / 2)
-            left_shoulder_quat = quat_from_vectors(np.array([1, 0, 0]), shoulder_to_arm)
-            bone_data["mixamorig:LeftShoulder"] = make_bone_transform(left_shoulder_quat)
-        
-        # Right Shoulder
-        if right_shoulder is not None and left_shoulder is not None:
-            shoulder_to_arm = normalize(right_shoulder - (left_shoulder + right_shoulder) / 2)
-            right_shoulder_quat = quat_from_vectors(np.array([-1, 0, 0]), shoulder_to_arm)
-            bone_data["mixamorig:RightShoulder"] = make_bone_transform(right_shoulder_quat)
-        
-        # Neck and Head
-        nose = get_pos("nose")
-        left_ear = get_pos("left_ear")
-        right_ear = get_pos("right_ear")
-        
-        if nose is not None and left_shoulder is not None and right_shoulder is not None:
-            neck_base = (left_shoulder + right_shoulder) / 2
-            head_dir = normalize(nose - neck_base)
-            neck_quat = quat_from_vectors(np.array([0, 1, 0]), head_dir)
-            bone_data["mixamorig:Neck"] = make_bone_transform(neck_quat)
-            bone_data["mixamorig:Head"] = make_bone_transform(np.array([1, 0, 0, 0]))
-        
-        # Feet
-        left_heel = get_pos("left_heel")
-        left_foot_index = get_pos("left_foot_index")
-        if left_ankle is not None and left_foot_index is not None:
-            foot_dir = normalize(left_foot_index - left_ankle)
-            left_foot_quat = quat_from_vectors(np.array([0, 0, 1]), foot_dir)
-            bone_data["mixamorig:LeftFoot"] = make_bone_transform(left_foot_quat)
-        
-        right_heel = get_pos("right_heel")
-        right_foot_index = get_pos("right_foot_index")
-        if right_ankle is not None and right_foot_index is not None:
-            foot_dir = normalize(right_foot_index - right_ankle)
-            right_foot_quat = quat_from_vectors(np.array([0, 0, 1]), foot_dir)
-            bone_data["mixamorig:RightFoot"] = make_bone_transform(right_foot_quat)
-        
+        return retarget_pose2d_to_mixamo(pose)
     except Exception as e:
-        print(f"Error converting pose: {e}")
+        print(f"Error in retargeting: {e}")
+        import traceback
+        traceback.print_exc()
         return None
-    
-    return bone_data
 
 
 def convert_mediapipe_to_mixamo(landmarks):

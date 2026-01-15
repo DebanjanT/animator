@@ -18,7 +18,7 @@ MoCapViewer::MoCapViewer(int width, int height, const std::string &title)
       backgroundColor(0.2f, 0.2f, 0.25f), running(false), lastX(width / 2.0f),
       lastY(height / 2.0f), firstMouse(true), deltaTime(0.0f), lastFrame(0.0f),
       showGrid(true), showImGuiDemo(false), showGizmo(true),
-      showSkeleton(false), showSkeletonOnly(false),
+      showSkeleton(false), showSkeletonOnly(false), showRetargetDebug(false),
       skeletonLineWidth(2.0f), jointSphereSize(0.02f),
       boneColor(0.0f, 0.8f, 1.0f), jointColor(1.0f, 0.4f, 0.0f),
       skeletonVAO(0), skeletonVBO(0), jointVAO(0), jointVBO(0), jointEBO(0), jointIndexCount(0),
@@ -461,6 +461,8 @@ void MoCapViewer::renderImGui() {
       ImGui::Checkbox("Show Skeleton", &showSkeleton);
       ImGui::Checkbox("Skeleton Only", &showSkeletonOnly);
       
+      ImGui::Checkbox("Retarget Debug", &showRetargetDebug);
+      
       if (showSkeleton || showSkeletonOnly) {
         // Note: Bone Width slider removed - glLineWidth > 1.0 not supported on macOS
         ImGui::SliderFloat("Joint Size", &jointSphereSize, 0.005f, 0.1f);
@@ -503,6 +505,90 @@ void MoCapViewer::renderImGui() {
     }
   }
   ImGui::End();
+  
+  // Retarget Debug Window - Shows bone transforms being applied
+  if (showRetargetDebug && animator) {
+    ImGui::SetNextWindowPos(ImVec2(10, 400), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(400, 350), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Retarget Debug", &showRetargetDebug)) {
+      auto& boneTransforms = animator->getBoneTransforms();
+      
+      ImGui::Text("Active Bone Transforms: %zu", boneTransforms.size());
+      ImGui::Text("External Transforms: %s", animator->hasExternalTransforms() ? "Yes" : "No");
+      ImGui::Separator();
+      
+      if (boneTransforms.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "No bone transforms received yet.");
+        ImGui::Text("Start pose estimation to see values.");
+      } else {
+        // Create a scrollable table of bone transforms
+        if (ImGui::BeginTable("BoneTransforms", 3, 
+            ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | 
+            ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable,
+            ImVec2(0, 250))) {
+          
+          ImGui::TableSetupColumn("Bone Name", ImGuiTableColumnFlags_WidthFixed, 150.0f);
+          ImGui::TableSetupColumn("Rotation (WXYZ)", ImGuiTableColumnFlags_WidthFixed, 180.0f);
+          ImGui::TableSetupColumn("Match", ImGuiTableColumnFlags_WidthFixed, 40.0f);
+          ImGui::TableSetupScrollFreeze(0, 1);
+          ImGui::TableHeadersRow();
+          
+          // Get model bone info for matching check
+          std::map<std::string, BoneInfo>* boneInfoMap = nullptr;
+          if (model) {
+            boneInfoMap = &model->getBoneInfoMap();
+          }
+          
+          for (const auto& [boneName, transform] : boneTransforms) {
+            ImGui::TableNextRow();
+            
+            // Bone name
+            ImGui::TableNextColumn();
+            
+            // Check if bone exists in model
+            bool boneExists = boneInfoMap && boneInfoMap->find(boneName) != boneInfoMap->end();
+            
+            if (boneExists) {
+              ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "%s", boneName.c_str());
+            } else {
+              ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", boneName.c_str());
+            }
+            
+            // Rotation quaternion
+            ImGui::TableNextColumn();
+            glm::quat q = transform.rotation;
+            ImGui::Text("%.2f %.2f %.2f %.2f", q.w, q.x, q.y, q.z);
+            
+            // Match indicator
+            ImGui::TableNextColumn();
+            if (boneExists) {
+              ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "OK");
+            } else {
+              ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), "X");
+            }
+          }
+          
+          ImGui::EndTable();
+        }
+        
+        ImGui::Separator();
+        
+        // Summary
+        if (model) {
+          auto& boneInfoMap = model->getBoneInfoMap();
+          int matchCount = 0;
+          for (const auto& [boneName, transform] : boneTransforms) {
+            if (boneInfoMap.find(boneName) != boneInfoMap.end()) {
+              matchCount++;
+            }
+          }
+          ImGui::Text("Matched: %d / %zu bones", matchCount, boneTransforms.size());
+          ImGui::Text("Model has: %zu bones", boneInfoMap.size());
+        }
+      }
+    }
+    ImGui::End();
+  }
 }
 
 void MoCapViewer::renderBoneHierarchy(const BoneNode &node) {
